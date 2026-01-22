@@ -527,6 +527,7 @@ class VALRTradingEngine:
                     price=formatted_tp,
                     post_only=False,  # Need immediate execution
                 )
+                self.logger.info(f"TP order response from VALR: {tp_order}")
 
                 # CRITICAL: Wait 1 second after order placement to avoid 404 errors
                 time.sleep(1.0)
@@ -535,6 +536,13 @@ class VALRTradingEngine:
 
                 if not tp_order_id:
                     raise TradingError("TP order placement returned no order ID")
+
+                # Immediately verify order exists on VALR
+                try:
+                    tp_status_check = self.api.get_order_status(tp_order_id, pair=pair)
+                    self.logger.info(f"TP order status immediately after placement: {tp_status_check}")
+                except Exception as check_error:
+                    self.logger.error(f"TP order {tp_order_id} doesn't exist on VALR immediately after placement: {check_error}")
 
             except Exception as e:
                 self.logger.error(f"CRITICAL: Failed to place TP order for {pair}: {e}. Closing entry position immediately.")
@@ -555,6 +563,7 @@ class VALRTradingEngine:
                     price=formatted_sl,
                     post_only=False,  # Need immediate execution
                 )
+                self.logger.info(f"SL order response from VALR: {sl_order}")
 
                 # CRITICAL: Wait 1 second after order placement to avoid 404 errors
                 time.sleep(1.0)
@@ -563,6 +572,13 @@ class VALRTradingEngine:
 
                 if not sl_order_id:
                     raise TradingError("SL order placement returned no order ID")
+
+                # Immediately verify order exists on VALR
+                try:
+                    sl_status_check = self.api.get_order_status(sl_order_id, pair=pair)
+                    self.logger.info(f"SL order status immediately after placement: {sl_status_check}")
+                except Exception as check_error:
+                    self.logger.error(f"SL order {sl_order_id} doesn't exist on VALR immediately after placement: {check_error}")
 
             except Exception as e:
                 self.logger.error(f"CRITICAL: Failed to place SL order for {pair}: {e}. Cancelling TP and closing position.")
