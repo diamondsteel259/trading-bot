@@ -230,12 +230,12 @@ class VALRTradingEngine:
         except Exception:
             return Decimal("0"), None
 
-    def _wait_for_order_fill(self, order_id: str, timeout_seconds: int, poll_seconds: float = 2.0) -> Tuple[str, Decimal, Optional[Decimal]]:
+    def _wait_for_order_fill(self, order_id: str, pair: str, timeout_seconds: int, poll_seconds: float = 2.0) -> Tuple[str, Decimal, Optional[Decimal]]:
         start = time.time()
         last_status = ""
 
         while True:
-            order_data = self.api.get_order_status(order_id)
+            order_data = self.api.get_order_status(order_id, pair=pair)
             status = self._extract_order_status(order_data)
             last_status = status or last_status
 
@@ -362,14 +362,14 @@ class VALRTradingEngine:
 
             self.logger.info(f"⏳ Waiting for entry fill ({self.config.ENTRY_ORDER_TIMEOUT_SECONDS}s timeout)...")
             fill_state, filled_qty, avg_fill_price = self._wait_for_order_fill(
-                entry_order_id, timeout_seconds=self.config.ENTRY_ORDER_TIMEOUT_SECONDS, poll_seconds=2.0
+                entry_order_id, pair=pair, timeout_seconds=self.config.ENTRY_ORDER_TIMEOUT_SECONDS, poll_seconds=2.0
             )
 
             # Critical: Cancel if not filled within 60 seconds (scalp trading)
             if fill_state in ["TIMEOUT", "CANCELLED"]:
                 self.logger.info(f"❌ Entry order not filled ({fill_state}). Cancelling {entry_order_id}...")
                 try:
-                    self.api.cancel_order(entry_order_id)
+                    self.api.cancel_order(entry_order_id, pair=pair)
                 finally:
                     self.order_persistence.update_order_status(entry_order_id, "cancelled")
                 return None
@@ -377,7 +377,7 @@ class VALRTradingEngine:
             if fill_state == "PARTIALLY_FILLED":
                 self.logger.info(f"⚠️ Entry partially filled (qty={filled_qty}). Cancelling remainder...")
                 try:
-                    self.api.cancel_order(entry_order_id)
+                    self.api.cancel_order(entry_order_id, pair=pair)
                 finally:
                     self.order_persistence.update_order_status(entry_order_id, "filled")
 
@@ -470,21 +470,21 @@ class VALRTradingEngine:
             self.logger.error(f"Unexpected error executing trade setup for {pair}: {e}")
             return None
 
-    def _cancel_if_open(self, order_id: Optional[str]) -> None:
+    def _cancel_if_open(self, order_id: Optional[str], pair: Optional[str] = None) -> None:
         if not order_id:
             return
         try:
-            status_data = self.api.get_order_status(order_id)
+            status_data = self.api.get_order_status(order_id, pair=pair) if pair else self.api.get_order_status(order_id)
             status = self._extract_order_status(status_data)
             if _status_is_filled(status) or _status_is_cancelled(status):
                 return
-            self.api.cancel_order(order_id)
+            self.api.cancel_order(order_id, pair=pair) if pair else self.api.cancel_order(order_id)
         except Exception:
             return
 
-    def _sync_persisted_order_status(self, order_id: str) -> None:
+    def _sync_persisted_order_status(self, order_id: str, pair: Optional[str] = None) -> None:
         try:
-            status_data = self.api.get_order_status(order_id)
+            status_data = self.api.get_order_status(order_id, pair=pair) if pair else self.api.get_order_status(order_id)
             status = self._extract_order_status(status_data)
             if _status_is_filled(status):
                 self.order_persistence.update_order_status(order_id, "filled")
@@ -499,12 +499,12 @@ class VALRTradingEngine:
 
         tp_id = position.get("take_profit_order_id")
         sl_id = position.get("stop_loss_order_id")
-        self._cancel_if_open(tp_id)
-        self._cancel_if_open(sl_id)
+        self._cancel_if_open(tp_id, pair=pair)
+        self._cancel_if_open(sl_id, pair=pair)
         if tp_id:
-            self._sync_persisted_order_status(tp_id)
+            self._sync_persisted_order_status(tp_id, pair=pair)
         if sl_id:
-            self._sync_persisted_order_status(sl_id)
+            self._sync_persisted_order_status(sl_id, pair=pair)
 
         qty_decimals = self.config.get_pair_quantity_decimals(pair)
         formatted_qty = DecimalUtils.format_quantity(position["quantity"], qty_decimals)
@@ -577,14 +577,14 @@ class VALRTradingEngine:
 
         if tp_id:
             try:
-                tp_data = self.api.get_order_status(tp_id)
+                tp_data = self.api.get_order_status(tp_id, pair=pair)
                 tp_status = self._extract_order_status(tp_data)
             except Exception:
                 tp_status = None
 
         if sl_id:
             try:
-                sl_data = self.api.get_order_status(sl_id)
+                sl_data = self.api.get_order_status(sl_id, pair=pair)
                 sl_status = self._extract_order_status(sl_data)
             except Exception:
                 sl_status = None
