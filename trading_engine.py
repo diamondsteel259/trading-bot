@@ -318,8 +318,9 @@ class VALRTradingEngine:
                 self.logger.warning(f"No order book available for {pair}")
                 return None
 
-            # Use ask price for buy orders (pay what sellers are asking for immediate fills)
-            entry_price = best_ask if best_ask is not None else best_bid
+            # For post-only BUY orders, use BID price (or below) to act as maker
+            # Using ASK would cross the spread and get rejected by post-only flag
+            entry_price = best_bid if best_bid is not None else best_ask
             if entry_price is None or entry_price <= 0:
                 return None
 
