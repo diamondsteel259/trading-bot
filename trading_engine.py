@@ -574,7 +574,6 @@ class VALRTradingEngine:
                 return None
 
             self.order_persistence.update_order_status(entry_order_id, "filled")
-            effective_entry_price = avg_fill_price or Decimal(formatted_price)
 
             # SIMPLE: Wait 5 seconds for settlement, then check actual wallet balance
             self.logger.info(f"Entry order filled. Waiting 5s for settlement...")
@@ -588,7 +587,11 @@ class VALRTradingEngine:
                 self.logger.error(f"No {base_currency} balance after order fill. Order may not have filled.")
                 return None
 
-            self.logger.info(f"Balance confirmed: {base_currency}={actual_balance}. Placing TP/SL...")
+            # Calculate actual entry price: ZAR spent / coins received
+            # For market orders, avg_fill_price may be unreliable, so calculate from actual amounts
+            effective_entry_price = trade_amount_quote / actual_balance if actual_balance > 0 else (avg_fill_price or entry_price)
+
+            self.logger.info(f"Balance confirmed: {base_currency}={actual_balance}. Entry price: R{effective_entry_price:.2f}. Placing TP/SL...")
 
             # Use actual balance as quantity for TP/SL orders
             filled_qty = actual_balance
