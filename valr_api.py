@@ -452,6 +452,36 @@ class VALRAPI:
 
         return [item for item in items if isinstance(item, dict)]
 
+    def get_recent_trades(self, pair: str, limit: int = 100) -> List[Dict]:
+        """Get recent trades for a trading pair.
+        
+        Used for aggregating 1-minute candles for RSI calculation.
+        Returns up to 100 recent trades (VALR API default).
+        
+        Args:
+            pair: Trading pair (e.g., "BTCZAR")
+            limit: Maximum number of trades to fetch (default 100)
+            
+        Returns:
+            List of trade dictionaries with keys: price, quantity, tradedAt, etc.
+        """
+        endpoint = f"/public/{pair}/trades"
+        
+        try:
+            response = self._make_request("GET", endpoint)
+            raw = response.data
+            
+            if isinstance(raw, list):
+                return raw[:limit]
+            elif isinstance(raw, dict):
+                items = raw.get("trades") or raw.get("data") or raw.get("items") or []
+                return items[:limit] if isinstance(items, list) else []
+            
+            return []
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch recent trades for {pair}: {e}")
+            return []
+
     def __enter__(self):
         return self
 
