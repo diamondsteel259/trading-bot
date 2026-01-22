@@ -279,6 +279,16 @@ class VALRTradingEngine:
         return best_bid, best_ask
 
     def execute_trade_setup(self, pair: str, rsi_value: float) -> Optional[str]:
+        """Execute scalp trade setup with R30 position sizing.
+        
+        For high-frequency scalp trading:
+        1. Check ZAR balance (R30 + fees required)
+        2. Calculate quantity based on current price
+        3. Place post-only entry order (maker fees)
+        4. Wait 60s max for fill, cancel if not filled
+        5. If filled, place TP/SL orders at ±1.5%/-2.0%
+        6. Monitor position with 30-minute timeout
+        """
         try:
             if self._is_daily_limit_reached():
                 self.logger.warning(f"Daily trade limit reached, skipping {pair}")
@@ -291,10 +301,12 @@ class VALRTradingEngine:
                 self.logger.warning(f"No order book available for {pair}")
                 return None
 
+            # Use bid price for entry (buy at bid to get maker fees)
             entry_price = best_bid if best_bid is not None else best_ask
             if entry_price is None or entry_price <= 0:
                 return None
 
+            # Calculate R30 position sizing
             trade_amount_quote = self.config.BASE_TRADE_AMOUNT
             qty = trade_amount_quote / entry_price
 
@@ -304,6 +316,7 @@ class VALRTradingEngine:
             formatted_price = DecimalUtils.format_price(entry_price, price_decimals)
             formatted_qty = DecimalUtils.format_quantity(qty, qty_decimals)
 
+            # Check balance: R30 + 0.18% maker fee = R30.054
             required_quote = trade_amount_quote + (trade_amount_quote * (self.config.MAKER_FEE_PERCENT / Decimal("100")))
             if not self.check_balance(quote_currency, required_quote):
                 available = self.get_available_balance(quote_currency)
@@ -312,15 +325,16 @@ class VALRTradingEngine:
                 )
 
             self.logger.info(
-                f"Oversold signal {pair}: RSI={rsi_value:.2f}. Placing {quote_currency} {trade_amount_quote} entry @ {formatted_price}"
+                f"🎯 Oversold signal {pair}: RSI={rsi_value:.2f}. Placing R30 entry @ {formatted_price}"
             )
 
+            # Place post-only entry order for maker fees (0.18%)
             entry_order_result = self.api.place_limit_order(
                 pair=pair,
                 side="BUY",
                 quantity=formatted_qty,
                 price=formatted_price,
-                post_only=True,
+                post_only=True,  # Critical for scalp trading fees
             )
             entry_order_id = str(entry_order_result.get("id") or entry_order_result.get("orderId") or "")
             if not entry_order_id:
@@ -346,13 +360,14 @@ class VALRTradingEngine:
                 status="PENDING",
             )
 
-            self.logger.info(f"Waiting for entry fill ({self.config.ENTRY_ORDER_TIMEOUT_SECONDS}s timeout)...")
+            self.logger.info(f"⏳ Waiting for entry fill ({self.config.ENTRY_ORDER_TIMEOUT_SECONDS}s timeout)...")
             fill_state, filled_qty, avg_fill_price = self._wait_for_order_fill(
                 entry_order_id, timeout_seconds=self.config.ENTRY_ORDER_TIMEOUT_SECONDS, poll_seconds=2.0
             )
 
+            # Critical: Cancel if not filled within 60 seconds (scalp trading)
             if fill_state in ["TIMEOUT", "CANCELLED"]:
-                self.logger.info(f"Entry order not filled ({fill_state}). Cancelling {entry_order_id}...")
+                self.logger.info(f"❌ Entry order not filled ({fill_state}). Cancelling {entry_order_id}...")
                 try:
                     self.api.cancel_order(entry_order_id)
                 finally:
@@ -360,7 +375,7 @@ class VALRTradingEngine:
                 return None
 
             if fill_state == "PARTIALLY_FILLED":
-                self.logger.info(f"Entry partially filled (qty={filled_qty}). Cancelling remainder...")
+                self.logger.info(f"⚠️ Entry partially filled (qty={filled_qty}). Cancelling remainder...")
                 try:
                     self.api.cancel_order(entry_order_id)
                 finally:
@@ -371,9 +386,9 @@ class VALRTradingEngine:
                 return None
 
             self.order_persistence.update_order_status(entry_order_id, "filled")
-
             effective_entry_price = avg_fill_price or Decimal(formatted_price)
 
+            # Calculate TP/SL prices for scalp trading
             tp_price = DecimalUtils.calculate_take_profit_price(
                 effective_entry_price, self.config.TAKE_PROFIT_PERCENTAGE
             )
@@ -385,21 +400,24 @@ class VALRTradingEngine:
             formatted_sl = DecimalUtils.format_price(sl_price, price_decimals)
             formatted_filled_qty = DecimalUtils.format_quantity(filled_qty, qty_decimals)
 
-            self.logger.info(f"Entry filled: qty={formatted_filled_qty} @ {effective_entry_price}. Placing TP/SL...")
+            self.logger.info(f"✅ Entry filled: qty={formatted_filled_qty} @ {effective_entry_price}. Placing TP/SL...")
 
+            # Place TP order (+1.5% profit target) - not post-only for quick execution
             tp_order = self.api.place_limit_order(
                 pair=pair,
                 side="SELL",
                 quantity=formatted_filled_qty,
                 price=formatted_tp,
-                post_only=False,
+                post_only=False,  # Need immediate execution
             )
+            
+            # Place SL order (-2.0% stop loss) - not post-only for quick execution  
             sl_order = self.api.place_limit_order(
                 pair=pair,
                 side="SELL",
                 quantity=formatted_filled_qty,
                 price=formatted_sl,
-                post_only=False,
+                post_only=False,  # Need immediate execution
             )
 
             tp_order_id = str(tp_order.get("id") or tp_order.get("orderId") or "")
@@ -439,7 +457,7 @@ class VALRTradingEngine:
 
             self._increment_trade_count()
 
-            self.logger.info(f"Trade active for {pair}: TP={formatted_tp} SL={formatted_sl}")
+            self.logger.info(f"💰 Position active for {pair}: TP={formatted_tp} SL={formatted_sl}")
             return entry_order_id
 
         except InsufficientBalanceError as e:
@@ -528,16 +546,26 @@ class VALRTradingEngine:
             self._monitor_single_position(position)
 
     def _monitor_single_position(self, position: Dict[str, Any]) -> None:
+        """Monitor position for scalp trading with proper timeouts.
+        
+        For scalp trading, positions should be closed quickly:
+        - Position timeout: 30 minutes maximum
+        - Exit order timeout: 10 minutes (TP/SL must fill or position closed)
+        """
         pair = position["pair"]
         position_id = position["id"]
 
         entry_filled_at: datetime = position.get("entry_filled_at") or position.get("created_at")
 
+        # Scalp trading: close position after 30 minutes maximum
         if datetime.now() > entry_filled_at + timedelta(minutes=self.config.POSITION_TIMEOUT_MINUTES):
+            self.logger.info(f"🕐 Position timeout for {pair} (30min max). Closing at market...")
             self._close_position_at_market(position, reason="position_timeout")
             return
 
+        # Exit orders must fill within 10 minutes or close position
         if datetime.now() > entry_filled_at + timedelta(minutes=self.config.EXIT_ORDER_TIMEOUT_MINUTES):
+            self.logger.info(f"⏰ Exit orders timeout for {pair} (10min max). Closing position...")
             self._close_position_at_market(position, reason="exit_orders_timeout")
             return
 
@@ -562,7 +590,7 @@ class VALRTradingEngine:
                 sl_status = None
 
         if tp_status and _status_is_filled(tp_status):
-            self.logger.info(f"Take profit filled for {pair}. Cancelling stop loss...")
+            self.logger.info(f"✅ Take profit filled for {pair}. Cancelling stop loss...")
             if tp_id:
                 self.order_persistence.update_order_status(tp_id, "filled")
             self._cancel_if_open(sl_id)
@@ -572,7 +600,7 @@ class VALRTradingEngine:
             return
 
         if sl_status and _status_is_filled(sl_status):
-            self.logger.info(f"Stop loss filled for {pair}. Cancelling take profit...")
+            self.logger.info(f"🛡️ Stop loss filled for {pair}. Cancelling take profit...")
             if sl_id:
                 self.order_persistence.update_order_status(sl_id, "filled")
             self._cancel_if_open(tp_id)
