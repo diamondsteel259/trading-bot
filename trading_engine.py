@@ -15,6 +15,7 @@ from config import Config
 from logging_setup import get_logger, get_valr_logger
 from decimal_utils import DecimalUtils
 from order_persistence import get_order_persistence
+from position_persistence import get_position_persistence
 
 
 class TradingError(Exception):
@@ -47,7 +48,11 @@ class PositionManager:
         self.config = config
         self.logger = get_logger("position_manager")
         self.valr_logger = get_valr_logger()
+        self.position_persistence = get_position_persistence()
         self.active_positions: Dict[str, Dict[str, Any]] = {}
+
+        # Load existing positions on startup
+        self._load_positions()
 
     def create_position(
         self,
@@ -77,6 +82,8 @@ class PositionManager:
         }
 
         self.active_positions[position_id] = position
+        self._save_positions()
+
         self.valr_logger.log_position_update(
             pair=pair,
             position_type="opened",
@@ -87,30 +94,59 @@ class PositionManager:
         )
         return position_id
 
+    def _load_positions(self) -> None:
+        """Load positions from persistence on startup."""
+        loaded_positions = self.position_persistence.load_positions()
+        if loaded_positions:
+            self.active_positions = loaded_positions
+            self.logger.info(f"Restored {len(loaded_positions)} positions from persistence")
+
+    def _save_positions(self) -> None:
+        """Save positions to persistence."""
+        self.position_persistence.save_positions(self.active_positions)
+
     def attach_exit_orders(self, position_id: str, tp_order_id: str, sl_order_id: str) -> None:
         position = self.active_positions.get(position_id)
         if not position:
             return
         position["take_profit_order_id"] = tp_order_id
         position["stop_loss_order_id"] = sl_order_id
+        self._save_positions()
 
-    def close_position(self, position_id: str, reason: str) -> None:
+    def close_position(self, position_id: str, reason: str, exit_price: Optional[Decimal] = None) -> Optional[Decimal]:
+        """Close position and return PnL."""
         position = self.active_positions.get(position_id)
         if not position:
-            return
+            return None
+
+        # Calculate PnL
+        pnl = None
+        if exit_price:
+            entry_price = position["entry_price"]
+            quantity = position["quantity"]
+            # PnL = (exit_price - entry_price) * quantity
+            pnl = (exit_price - entry_price) * quantity
+
         position["status"] = "closed"
         position["closed_at"] = datetime.now(timezone.utc)
         position["close_reason"] = reason
+        if exit_price:
+            position["exit_price"] = exit_price
+        if pnl:
+            position["pnl"] = pnl
 
         self.valr_logger.log_position_update(
             pair=position["pair"],
             position_type="closed",
             quantity=float(position["quantity"]),
             entry_price=float(position["entry_price"]),
-            pnl=0.0,
+            pnl=float(pnl) if pnl else 0.0,
         )
 
         del self.active_positions[position_id]
+        self.position_persistence.delete_position(position_id)
+
+        return pnl
 
     def get_open_positions(self) -> List[Dict[str, Any]]:
         return [pos for pos in self.active_positions.values() if pos.get("status") == "open"]
@@ -131,6 +167,10 @@ class VALRTradingEngine:
         self.trades_today = 0
         self.last_trade_date = datetime.now(timezone.utc).date()
         self.daily_pnl = Decimal("0")
+
+        # Win/loss tracking
+        self.wins_today = 0
+        self.losses_today = 0
 
         # Reference to parent bot for shutdown detection
         self.bot = None
@@ -746,7 +786,16 @@ class VALRTradingEngine:
             self._cancel_if_open(sl_id)
             if sl_id:
                 self.order_persistence.update_order_status(sl_id, "cancelled")
-            self.position_manager.close_position(position_id, "take_profit")
+
+            # Calculate PnL for TP exit
+            tp_price = position.get("take_profit_price")
+            pnl = self.position_manager.close_position(position_id, "take_profit", tp_price)
+
+            # Track as win
+            if pnl and pnl > 0:
+                self.wins_today += 1
+                self.daily_pnl += pnl
+                self.logger.info(f"WIN: {pair} closed at TP. PnL: +R{pnl:.2f}")
             return
 
         if sl_filled:
@@ -756,13 +805,24 @@ class VALRTradingEngine:
             self._cancel_if_open(tp_id)
             if tp_id:
                 self.order_persistence.update_order_status(tp_id, "cancelled")
-            self.position_manager.close_position(position_id, "stop_loss")
+
+            # Calculate PnL for SL exit
+            sl_price = position.get("stop_loss_price")
+            pnl = self.position_manager.close_position(position_id, "stop_loss", sl_price)
+
+            # Track as loss
+            if pnl and pnl < 0:
+                self.losses_today += 1
+                self.daily_pnl += pnl
+                self.logger.info(f"LOSS: {pair} closed at SL. PnL: R{pnl:.2f}")
             return
 
     def _is_daily_limit_reached(self) -> bool:
         current_date = datetime.now(timezone.utc).date()
         if current_date != self.last_trade_date:
             self.trades_today = 0
+            self.wins_today = 0
+            self.losses_today = 0
             self.daily_pnl = Decimal("0")
             self.last_trade_date = current_date
         return self.trades_today >= self.config.MAX_DAILY_TRADES
@@ -773,11 +833,17 @@ class VALRTradingEngine:
 
     def get_trading_statistics(self) -> Dict:
         open_positions = self.position_manager.get_open_positions()
+        total_closed = self.wins_today + self.losses_today
+        win_rate = (self.wins_today / total_closed * 100) if total_closed > 0 else 0.0
+
         return {
             "trades_today": self.trades_today,
             "max_daily_trades": self.config.MAX_DAILY_TRADES,
             "daily_limit_reached": self._is_daily_limit_reached(),
             "open_positions": len(open_positions),
-            "daily_pnl": str(self.daily_pnl),
+            "wins_today": self.wins_today,
+            "losses_today": self.losses_today,
+            "win_rate": f"{win_rate:.1f}%",
+            "daily_pnl": f"R{self.daily_pnl:.2f}",
             "last_trade_date": self.last_trade_date.isoformat(),
         }

@@ -76,7 +76,7 @@ class Config:
         "SOLZAR": 0,     # Tick size: 1 (whole numbers)
         "DOTZAR": 2,     # Tick size: 0.01
         "LINKZAR": 2,    # Tick size: 0.01
-        "LTCZAR": 2,     # Tick size: 0.01
+        "LTCZAR": 1,     # Tick size: 0.1
         "BCHZAR": 0,     # Tick size: 1 (whole numbers)
         "AVAXZAR": 2,    # Tick size: 0.01
         "DOGEZAR": 4,    # Tick size: 0.0001
