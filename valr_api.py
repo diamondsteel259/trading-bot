@@ -124,8 +124,8 @@ class VALRAPI:
 
         headers = {
             "X-VALR-API-KEY": self.config.VALR_API_KEY,
-            "X-VALR-API-SIGNATURE": signature,
-            "X-VALR-API-TIMESTAMP": timestamp,
+            "X-VALR-SIGNATURE": signature,
+            "X-VALR-TIMESTAMP": timestamp,
             "Content-Type": "application/json",
         }
 
