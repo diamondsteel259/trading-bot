@@ -66,47 +66,67 @@ class RSIScanner:
         rsi = 100.0 - (100.0 / (1.0 + rs))
         return rsi
 
-    def get_rsi(self, pair: str, period: int = 14) -> Optional[float]:
-        """Get RSI for scalp trading signals.
+    def get_rsi(self, pair: str, period: int = 14) -> Tuple[Optional[float], Optional[float], int, str]:
+        """Get RSI data for scalp trading signals.
         
         Uses VALR's market summary endpoint to get current prices
         and calculates RSI locally for oversold detection.
+
+        Returns:
+            Tuple of (rsi_value, last_price, history_len, error_msg)
         """
+        last_price = None
+        history_len = 0
         try:
             # Get current price for scalp trading entry calculation
-            last_price = float(self.api.get_last_traded_price(pair))
+            price_data = self.api.get_last_traded_price(pair)
+            last_price = float(price_data)
             if last_price <= 0:
-                return None
+                return None, last_price, 0, "Invalid price"
 
             self._add_price_point(pair, last_price)
             history = self._price_history.get(pair, [])
+            history_len = len(history)
             
-            if len(history) < period + 1:
-                return None
+            if history_len < period + 1:
+                return None, last_price, history_len, f"Not enough candles ({history_len}/{period + 1})"
                 
             rsi_value = self._calculate_rsi(history, period=period)
+            if rsi_value is None:
+                return None, last_price, history_len, "RSI calculation failed"
             
-            # Log for scalp trading analysis
-            self.logger.debug(f"RSI for {pair}: {rsi_value:.2f} (price: {last_price:.4f})")
-            return rsi_value
+            return rsi_value, last_price, history_len, ""
         except Exception as e:
-            self.logger.error(f"Failed to get RSI for {pair}: {e}")
-            return None
+            return None, last_price, history_len, str(e)
 
     def scan_pair(self, pair: str) -> Tuple[bool, Optional[float]]:
         if self._is_in_cooldown(pair):
             self.logger.debug(f"Pair {pair} is in cooldown, skipping scan")
             return False, None
 
-        rsi_value = self.get_rsi(pair)
-        if rsi_value is None:
-            return False, None
+        rsi_value, last_price, history_len, error_msg = self.get_rsi(pair)
+        
+        is_oversold = False
+        if rsi_value is not None:
+            self.last_scan_times[pair] = datetime.now()
+            is_oversold = rsi_value < self.config.RSI_THRESHOLD
+            action = "BUY_SIGNAL" if is_oversold else "NO_SIGNAL"
+            self.valr_logger.log_rsi_scan(pair, rsi_value, self.config.RSI_THRESHOLD, action)
 
-        self.last_scan_times[pair] = datetime.now()
-
-        is_oversold = rsi_value < self.config.RSI_THRESHOLD
-        action = "BUY_SIGNAL" if is_oversold else "NO_SIGNAL"
-        self.valr_logger.log_rsi_scan(pair, rsi_value, self.config.RSI_THRESHOLD, action)
+        # Detailed logging for debugging RSI triggers
+        price_display = f"R{last_price:,.2f}" if last_price is not None else "Unknown"
+        rsi_display = f"{rsi_value:.1f}" if rsi_value is not None else "None"
+        status_display = "YES ✅" if is_oversold else "NO ❌"
+        
+        log_msg = f"{pair}: Price={price_display} | Candles={history_len} | RSI={rsi_display} | Oversold={status_display}"
+        
+        if not is_oversold:
+            if rsi_value is not None:
+                log_msg += f" ({rsi_display} >= {self.config.RSI_THRESHOLD})"
+            else:
+                log_msg += f" ({error_msg})"
+        
+        self.logger.info(log_msg)
 
         return is_oversold, rsi_value
 
@@ -114,7 +134,7 @@ class RSIScanner:
         if pairs is None:
             pairs = self.config.TRADING_PAIRS
 
-        self.logger.info(f"Scanning {len(pairs)} pairs for oversold conditions")
+        self.logger.info(f"Scanning {len(pairs)} pairs for oversold conditions (Threshold: {self.config.RSI_THRESHOLD})")
 
         results: List[Dict] = []
         for pair in pairs:
