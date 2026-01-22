@@ -308,7 +308,7 @@ class VALRAPI:
         endpoint = f"/public/{pair}/orderbook"
         
         try:
-            response = self._make_request("GET", [endpoint])
+            response = self._make_request("GET", endpoint)
             return response.data if isinstance(response.data, dict) else {"data": response.data}
         except VALRAPIErrorCode as e:
             if e.status_code != 404:
