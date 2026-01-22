@@ -294,6 +294,8 @@ class VALRTradingEngine:
         """
         start = time.time()
         last_status = ""
+        original_qty = Decimal("0")
+        original_price = Decimal("0")
 
         while True:
             # Check if bot is shutting down
@@ -308,12 +310,33 @@ class VALRTradingEngine:
             status = self._extract_order_status(order_data)
             last_status = status or last_status
 
+            # Get original order details for fallback
+            if original_qty == 0:
+                orig_qty_raw = order_data.get("originalQuantity") or order_data.get("quantity")
+                if orig_qty_raw:
+                    try:
+                        original_qty = Decimal(str(orig_qty_raw))
+                    except:
+                        pass
+
+            if original_price == 0:
+                orig_price_raw = order_data.get("originalPrice") or order_data.get("price")
+                if orig_price_raw:
+                    try:
+                        original_price = Decimal(str(orig_price_raw))
+                    except:
+                        pass
+
             filled_qty = self._extract_filled_quantity(order_data)
             avg_fill_price = self._extract_avg_fill_price(order_data)
 
             if _status_is_filled(status):
-                if filled_qty == 0:
-                    filled_qty, avg_fill_price = self._fetch_fill_details(order_id)
+                # If order is marked FILLED but we can't extract quantity, use original order quantity
+                if filled_qty == 0 and original_qty > 0:
+                    self.logger.warning(f"Order {order_id} marked FILLED but qty extraction failed. Using original qty={original_qty}")
+                    filled_qty = original_qty
+                if avg_fill_price is None and original_price > 0:
+                    avg_fill_price = original_price
                 return "FILLED", filled_qty, avg_fill_price
 
             if _status_is_cancelled(status):
