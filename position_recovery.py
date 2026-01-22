@@ -28,6 +28,13 @@ def recover_positions_from_valr(api: VALRAPI) -> List[Dict[str, Any]]:
         open_orders = api.get_open_orders()
         logger.info(f"Fetched {len(open_orders)} open orders from VALR for position recovery")
 
+        # DEBUG: Log all orders
+        for idx, order in enumerate(open_orders):
+            logger.info(f"Order {idx+1}: pair={order.get('currencyPair')}, side={order.get('side')}, "
+                       f"qty={order.get('originalQuantity') or order.get('quantity')}, "
+                       f"price={order.get('price') or order.get('limitPrice')}, "
+                       f"id={order.get('orderId') or order.get('id')}")
+
         if not open_orders:
             return []
 
@@ -52,9 +59,21 @@ def recover_positions_from_valr(api: VALRAPI) -> List[Dict[str, Any]]:
             if len(sell_orders) < 2:
                 continue  # Need at least 2 sell orders (TP and SL)
 
+            # Track which orders have been matched to avoid duplicate recovery
+            matched_order_ids = set()
+
             # Try to match TP/SL pairs by quantity
             for i, order1 in enumerate(sell_orders):
+                # Skip if this order was already matched in a previous pair
+                order1_id = _extract_order_id(order1)
+                if order1_id in matched_order_ids:
+                    continue
+
                 for order2 in sell_orders[i+1:]:
+                    # Skip if this order was already matched
+                    order2_id = _extract_order_id(order2)
+                    if order2_id in matched_order_ids:
+                        continue
                     qty1 = _extract_quantity(order1)
                     qty2 = _extract_quantity(order2)
 
@@ -101,10 +120,9 @@ def recover_positions_from_valr(api: VALRAPI) -> List[Dict[str, Any]]:
                             f"TP={tp_price} SL={sl_price}"
                         )
 
-                        # Remove these orders from list to avoid duplicate detection
-                        sell_orders.remove(order1)
-                        sell_orders.remove(order2)
-                        break
+                        # Mark these orders as matched
+                        matched_order_ids.add(order1_id)
+                        matched_order_ids.add(order2_id)
 
         if recovered_positions:
             logger.info(f"Successfully recovered {len(recovered_positions)} positions from VALR")

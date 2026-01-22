@@ -107,6 +107,27 @@ class Config:
         "ETHUSDT": 6,
     }
 
+    # Tick sizes (minimum price increment) for each pair
+    PAIR_TICK_SIZES = {
+        "BTCZAR": "1",
+        "ETHZAR": "1",
+        "SOLZAR": "1",
+        "BNBZAR": "1",
+        "AVAXZAR": "0.1",
+        "LTCZAR": "0.1",
+        "XRPZAR": "0.01",
+        "USDTZAR": "0.01",
+        "ADAZAR": "0.001",
+        "XLMZAR": "0.001",
+        "DOGEZAR": "0.00001",
+        "SHIBZAR": "0.0000001",
+        "TRXZAR": "0.0001",
+        "LINKZAR": "0.01",
+        "XAUTZAR": "1",
+        "BCHZAR": "1",
+        "DEFAULT": "0.01"
+    }
+
     def __init__(self):
         self._load_from_env()
         self._validate_config()
@@ -121,7 +142,7 @@ class Config:
         self.TRADING_PAIRS = [pair.strip() for pair in self.TRADING_PAIRS if pair.strip()]
 
         self.RSI_THRESHOLD = float(os.getenv("RSI_THRESHOLD", "45.0"))
-        self.TAKE_PROFIT_PERCENTAGE = float(os.getenv("TAKE_PROFIT_PERCENTAGE", "1.5"))
+        self.TAKE_PROFIT_PERCENTAGE = float(os.getenv("TAKE_PROFIT_PERCENTAGE", "2.0"))
         self.STOP_LOSS_PERCENTAGE = float(os.getenv("STOP_LOSS_PERCENTAGE", "2.0"))
 
         # Scalp-specific timing
@@ -232,6 +253,10 @@ class Config:
 
     def get_pair_decimals(self, pair: str) -> int:
         return self.get_pair_price_decimals(pair)
+
+    def get_pair_tick_size(self, pair: str) -> str:
+        """Get tick size (minimum price increment) for a trading pair."""
+        return self.PAIR_TICK_SIZES.get(pair, self.PAIR_TICK_SIZES["DEFAULT"])
 
     def create_directories(self) -> None:
         log_dir = Path(self.LOG_FILE_PATH).parent

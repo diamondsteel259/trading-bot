@@ -333,21 +333,23 @@ class RSIScanner:
             best_ask_price = float(asks[0]["price"]) if asks else None
             best_bid_price = float(bids[0]["price"]) if bids else None
 
-            if best_bid_price is not None:
-                recommended_entry = best_bid_price
-            elif best_ask_price is not None:
-                recommended_entry = best_ask_price * 0.999
+            # For buying, use ASK price (lowest seller price) for immediate fills
+            if best_ask_price is not None:
+                recommended_entry = best_ask_price
+            elif best_bid_price is not None:
+                # Fallback: slightly above bid if no asks available
+                recommended_entry = best_bid_price * 1.001
             else:
                 return None
 
             trade_amount_quote = self.config.BASE_TRADE_AMOUNT
             quantity = trade_amount_quote / DecimalUtils.to_decimal(recommended_entry)
 
-            price_decimals = self.config.get_pair_price_decimals(pair)
+            tick_size = self.config.get_pair_tick_size(pair)
             qty_decimals = self.config.get_pair_quantity_decimals(pair)
 
             formatted_quantity = DecimalUtils.format_quantity(quantity, qty_decimals)
-            formatted_price = DecimalUtils.format_price(recommended_entry, price_decimals)
+            formatted_price = DecimalUtils.format_price(recommended_entry, tick_size)
 
             return {
                 "pair": pair,

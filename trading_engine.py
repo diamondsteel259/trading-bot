@@ -294,6 +294,8 @@ class VALRTradingEngine:
         """
         start = time.time()
         last_status = ""
+        original_qty = Decimal("0")
+        original_price = Decimal("0")
 
         while True:
             # Check if bot is shutting down
@@ -308,12 +310,33 @@ class VALRTradingEngine:
             status = self._extract_order_status(order_data)
             last_status = status or last_status
 
+            # Get original order details for fallback
+            if original_qty == 0:
+                orig_qty_raw = order_data.get("originalQuantity") or order_data.get("quantity")
+                if orig_qty_raw:
+                    try:
+                        original_qty = Decimal(str(orig_qty_raw))
+                    except:
+                        pass
+
+            if original_price == 0:
+                orig_price_raw = order_data.get("originalPrice") or order_data.get("price")
+                if orig_price_raw:
+                    try:
+                        original_price = Decimal(str(orig_price_raw))
+                    except:
+                        pass
+
             filled_qty = self._extract_filled_quantity(order_data)
             avg_fill_price = self._extract_avg_fill_price(order_data)
 
             if _status_is_filled(status):
-                if filled_qty == 0:
-                    filled_qty, avg_fill_price = self._fetch_fill_details(order_id)
+                # If order is marked FILLED but we can't extract quantity, use original order quantity
+                if filled_qty == 0 and original_qty > 0:
+                    self.logger.warning(f"Order {order_id} marked FILLED but qty extraction failed. Using original qty={original_qty}")
+                    filled_qty = original_qty
+                if avg_fill_price is None and original_price > 0:
+                    avg_fill_price = original_price
                 return "FILLED", filled_qty, avg_fill_price
 
             if _status_is_cancelled(status):
@@ -387,10 +410,10 @@ class VALRTradingEngine:
             trade_amount_quote = self.config.BASE_TRADE_AMOUNT
             qty = trade_amount_quote / entry_price
 
-            price_decimals = self.config.get_pair_price_decimals(pair)
+            tick_size = self.config.get_pair_tick_size(pair)
             qty_decimals = self.config.get_pair_quantity_decimals(pair)
 
-            formatted_price = DecimalUtils.format_price(entry_price, price_decimals)
+            formatted_price = DecimalUtils.format_price(entry_price, tick_size)
             formatted_qty = DecimalUtils.format_quantity(qty, qty_decimals)
 
             # Check balance: R30 + 0.5% taker fee + safety buffer = R30.15 + 0.05
@@ -422,6 +445,10 @@ class VALRTradingEngine:
                 price=formatted_price,
                 post_only=False,  # Allow immediate fill for scalping
             )
+
+            # CRITICAL: Wait 1 second after order placement to avoid 404 errors when checking status
+            time.sleep(1.0)
+
             entry_order_id = str(entry_order_result.get("id") or entry_order_result.get("orderId") or "")
             if not entry_order_id:
                 self.logger.error(f"Entry order placement succeeded but no order id returned: {entry_order_result}")
@@ -464,36 +491,37 @@ class VALRTradingEngine:
                     self.order_persistence.update_order_status(entry_order_id, "cancelled")
                 return None
 
-            # Critical: Cancel if not filled within 5 seconds (scalp trading with immediate fills)
-            if fill_state in ["TIMEOUT", "CANCELLED"]:
-                self.logger.warning(f"Entry order not filled ({fill_state}) - market may have moved. Cancelling {entry_order_id}...")
+            # Critical: Only proceed if order is actually FILLED
+            if fill_state != "FILLED":
+                self.logger.warning(f"Entry order not filled ({fill_state}). Cancelling {entry_order_id}...")
                 try:
                     self.api.cancel_order(entry_order_id, pair=pair)
                 finally:
                     self.order_persistence.update_order_status(entry_order_id, "cancelled")
                 return None
 
-            if fill_state == "PARTIALLY_FILLED":
-                self.logger.warning(f"Entry partially filled (qty={filled_qty}). Cancelling remainder...")
-                try:
-                    self.api.cancel_order(entry_order_id, pair=pair)
-                finally:
-                    self.order_persistence.update_order_status(entry_order_id, "filled")
-
-            # If order filled but quantity extraction failed, use the original order quantity
-            # This happens when fills endpoint returns 404 immediately after fill
-            if filled_qty <= 0:
-                self.logger.warning(
-                    f"Entry order marked {fill_state} but couldn't extract filled qty. "
-                    f"Using original order quantity: {formatted_qty}"
-                )
-                filled_qty = Decimal(formatted_qty)
-                avg_fill_price = Decimal(formatted_price)
-
             self.order_persistence.update_order_status(entry_order_id, "filled")
             effective_entry_price = avg_fill_price or Decimal(formatted_price)
 
-            # Calculate TP/SL prices for scalp trading
+            # SIMPLE: Wait 5 seconds for settlement, then check actual wallet balance
+            self.logger.info(f"Entry order filled. Waiting 5s for settlement...")
+            time.sleep(5.0)
+
+            # Check actual wallet balance to get exact filled quantity
+            base_currency = pair.replace("ZAR", "")
+            actual_balance = self.get_available_balance(base_currency)
+
+            if actual_balance <= 0:
+                self.logger.error(f"No {base_currency} balance after order fill. Order may not have filled.")
+                return None
+
+            self.logger.info(f"Balance confirmed: {base_currency}={actual_balance}. Placing TP/SL...")
+
+            # Use actual balance as quantity for TP/SL orders
+            filled_qty = actual_balance
+            formatted_filled_qty = DecimalUtils.format_quantity(filled_qty, qty_decimals)
+
+            # Calculate TP/SL prices
             tp_price = DecimalUtils.calculate_take_profit_price(
                 effective_entry_price, self.config.TAKE_PROFIT_PERCENTAGE
             )
@@ -501,11 +529,9 @@ class VALRTradingEngine:
                 effective_entry_price, self.config.STOP_LOSS_PERCENTAGE
             )
 
-            formatted_tp = DecimalUtils.format_price(tp_price, price_decimals)
-            formatted_sl = DecimalUtils.format_price(sl_price, price_decimals)
-            formatted_filled_qty = DecimalUtils.format_quantity(filled_qty, qty_decimals)
-
-            self.logger.info(f"Entry filled: qty={formatted_filled_qty} @ {effective_entry_price}. Placing TP/SL...")
+            tick_size = self.config.get_pair_tick_size(pair)
+            formatted_tp = DecimalUtils.format_price(tp_price, tick_size)
+            formatted_sl = DecimalUtils.format_price(sl_price, tick_size)
 
             # CRITICAL: Place TP/SL orders with validation - if either fails, close position immediately
             tp_order = None
@@ -522,10 +548,26 @@ class VALRTradingEngine:
                     price=formatted_tp,
                     post_only=False,  # Need immediate execution
                 )
+
+                # CRITICAL: Wait 1 second after order placement to avoid 404 errors
+                time.sleep(1.0)
+
                 tp_order_id = str(tp_order.get("id") or tp_order.get("orderId") or "")
 
                 if not tp_order_id:
                     raise TradingError("TP order placement returned no order ID")
+
+                # Verify order was accepted
+                try:
+                    tp_status_check = self.api.get_order_status(tp_order_id, pair=pair)
+                    tp_status_type = tp_status_check.get("orderStatusType", "")
+                    if tp_status_type == "Failed":
+                        fail_reason = tp_status_check.get("failedReason", "Unknown")
+                        raise TradingError(f"TP order failed: {fail_reason}")
+                except TradingError:
+                    raise
+                except Exception as check_error:
+                    self.logger.warning(f"Could not verify TP order status: {check_error}")
 
             except Exception as e:
                 self.logger.error(f"CRITICAL: Failed to place TP order for {pair}: {e}. Closing entry position immediately.")
@@ -546,10 +588,26 @@ class VALRTradingEngine:
                     price=formatted_sl,
                     post_only=False,  # Need immediate execution
                 )
+
+                # CRITICAL: Wait 1 second after order placement to avoid 404 errors
+                time.sleep(1.0)
+
                 sl_order_id = str(sl_order.get("id") or sl_order.get("orderId") or "")
 
                 if not sl_order_id:
                     raise TradingError("SL order placement returned no order ID")
+
+                # Verify order was accepted
+                try:
+                    sl_status_check = self.api.get_order_status(sl_order_id, pair=pair)
+                    sl_status_type = sl_status_check.get("orderStatusType", "")
+                    if sl_status_type == "Failed":
+                        fail_reason = sl_status_check.get("failedReason", "Unknown")
+                        raise TradingError(f"SL order failed: {fail_reason}")
+                except TradingError:
+                    raise
+                except Exception as check_error:
+                    self.logger.warning(f"Could not verify SL order status: {check_error}")
 
             except Exception as e:
                 self.logger.error(f"CRITICAL: Failed to place SL order for {pair}: {e}. Cancelling TP and closing position.")
@@ -697,8 +755,8 @@ class VALRTradingEngine:
                 self.position_manager.close_position(position_id, reason)
                 return
 
-            price_decimals = self.config.get_pair_price_decimals(pair)
-            aggressive_price = DecimalUtils.format_price(best_bid, price_decimals)
+            tick_size = self.config.get_pair_tick_size(pair)
+            aggressive_price = DecimalUtils.format_price(best_bid, tick_size)
             try:
                 self.api.place_limit_order(
                     pair=pair,
@@ -752,6 +810,51 @@ class VALRTradingEngine:
 
         tp_id = position.get("take_profit_order_id")
         sl_id = position.get("stop_loss_order_id")
+
+        # CRITICAL: Check if TP/SL orders still exist on exchange
+        # If orders are missing from VALR (filled or cancelled), close the position
+        if tp_id or sl_id:
+            # Get all open orders from VALR to verify TP/SL still exist
+            try:
+                open_orders = self.api.get_open_orders(pair=pair)
+                open_order_ids = {str(order.get("orderId") or order.get("id") or "") for order in open_orders}
+
+                tp_exists = tp_id in open_order_ids if tp_id else False
+                sl_exists = sl_id in open_order_ids if sl_id else False
+
+                # If NEITHER TP nor SL exist on exchange, position was exited but coins may still be in wallet
+                # We need to close position at market to sell the coins
+                if not tp_exists and not sl_exists:
+                    self.logger.warning(
+                        f"Position {pair} has no TP/SL orders on VALR. Orders were filled or cancelled. "
+                        f"Selling coins at market price (TP={tp_id}, SL={sl_id})"
+                    )
+                    self._close_position_at_market(position, reason="orders_not_found_on_exchange")
+                    return
+
+                # If only ONE order is missing, one exit order was filled - position was sold
+                # Cancel the remaining order and close position tracking (coins already sold)
+                if not tp_exists and sl_exists:
+                    self.logger.info(f"TP order {tp_id} not found on VALR for {pair}. Likely filled. Cancelling SL...")
+                    self._cancel_if_open(sl_id, pair=pair)
+                    if sl_id:
+                        self.order_persistence.update_order_status(sl_id, "cancelled")
+                    # Position already sold via TP, just close tracking
+                    self.position_manager.close_position(position_id, "take_profit")
+                    return
+
+                if not sl_exists and tp_exists:
+                    self.logger.info(f"SL order {sl_id} not found on VALR for {pair}. Likely filled. Cancelling TP...")
+                    self._cancel_if_open(tp_id, pair=pair)
+                    if tp_id:
+                        self.order_persistence.update_order_status(tp_id, "cancelled")
+                    # Position already sold via SL, just close tracking
+                    self.position_manager.close_position(position_id, "stop_loss")
+                    return
+
+            except Exception as e:
+                self.logger.error(f"Failed to check if TP/SL orders exist for {pair}: {e}")
+                # Continue with normal flow if check fails
 
         # CRITICAL: Fetch BOTH order statuses before taking any action (prevents race condition)
         tp_status = None

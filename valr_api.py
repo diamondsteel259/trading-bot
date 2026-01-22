@@ -531,6 +531,30 @@ class VALRAPI:
             self.logger.warning(f"Failed to fetch recent trades for {pair}: {e}")
             return []
 
+    def get_open_orders(self, pair: Optional[str] = None) -> List[Dict]:
+        """Get all open (active) orders.
+
+        Args:
+            pair: Optional currency pair to filter by (not used - VALR API returns all open orders)
+
+        Returns:
+            List of open order dictionaries
+        """
+        endpoint = "/orders/open"
+        try:
+            response = self._make_request("GET", endpoint)
+            raw = response.data
+            if isinstance(raw, dict):
+                items = raw.get("orders") or raw.get("data") or raw.get("items") or []
+            elif isinstance(raw, list):
+                items = raw
+            else:
+                items = []
+            return [item for item in items if isinstance(item, dict)]
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch open orders: {e}")
+            return []
+
     def __enter__(self):
         return self
 
