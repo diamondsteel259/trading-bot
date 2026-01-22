@@ -132,6 +132,9 @@ class VALRTradingEngine:
         self.last_trade_date = datetime.now(timezone.utc).date()
         self.daily_pnl = Decimal("0")
 
+        # Reference to parent bot for shutdown detection
+        self.bot = None
+
     def _get_quote_currency(self, pair: str) -> str:
         for quote in ["ZAR", "USDT", "USD"]:
             if pair.endswith(quote):
@@ -234,15 +237,20 @@ class VALRTradingEngine:
         """Wait for order to fill with exponential backoff polling to reduce API calls.
 
         Polling strategy:
-        - First 10s: Poll every 1s (10 calls)
-        - Next 20s: Poll every 2s (10 calls)
-        - Last 30s: Poll every 5s (6 calls)
-        - Total: 26 API calls (down from 30 with fixed 2s polling)
+        - First 10s: Poll every 0.5s (20 calls)
+        - Next 20s: Poll every 1s (20 calls)
+        - Last 30s: Poll every 2s (15 calls)
+        - Total: ~55 API calls (more responsive to shutdown)
         """
         start = time.time()
         last_status = ""
 
         while True:
+            # Check if bot is shutting down
+            if self.bot and hasattr(self.bot, 'running') and not self.bot.running:
+                self.logger.info(f"Shutdown detected during order wait. Cancelling order {order_id}...")
+                return "SHUTDOWN", Decimal("0"), None
+
             elapsed = time.time() - start
 
             # Check order status
@@ -267,12 +275,13 @@ class VALRTradingEngine:
                 return "TIMEOUT", filled_qty, avg_fill_price
 
             # Exponential backoff: faster polling initially, slower as time passes
+            # Use shorter sleeps to be more responsive to shutdown signals
             if elapsed < 10:
-                time.sleep(1.0)  # First 10s: check every 1s
+                time.sleep(0.5)  # First 10s: check every 0.5s (was 1s)
             elif elapsed < 30:
-                time.sleep(2.0)  # Next 20s: check every 2s
+                time.sleep(1.0)  # Next 20s: check every 1s (was 2s)
             else:
-                time.sleep(5.0)  # Last 30s: check every 5s
+                time.sleep(2.0)  # Last 30s: check every 2s (was 5s)
 
     def _get_best_bid_ask(self, pair: str) -> Tuple[Optional[Decimal], Optional[Decimal]]:
         book = self.api.get_order_book(pair)
@@ -318,8 +327,9 @@ class VALRTradingEngine:
                 self.logger.warning(f"No order book available for {pair}")
                 return None
 
-            # Use ask price for buy orders (pay what sellers are asking for immediate fills)
-            entry_price = best_ask if best_ask is not None else best_bid
+            # For post-only BUY orders, use BID price (or below) to act as maker
+            # Using ASK would cross the spread and get rejected by post-only flag
+            entry_price = best_bid if best_bid is not None else best_ask
             if entry_price is None or entry_price <= 0:
                 return None
 
@@ -388,6 +398,17 @@ class VALRTradingEngine:
             fill_state, filled_qty, avg_fill_price = self._wait_for_order_fill(
                 entry_order_id, pair=pair, timeout_seconds=self.config.ENTRY_ORDER_TIMEOUT_SECONDS
             )
+
+            # Critical: Handle shutdown signal immediately
+            if fill_state == "SHUTDOWN":
+                self.logger.info(f"Shutdown signal received. Cancelling entry order {entry_order_id}...")
+                try:
+                    self.api.cancel_order(entry_order_id, pair=pair)
+                except Exception as e:
+                    self.logger.error(f"Error cancelling order during shutdown: {e}")
+                finally:
+                    self.order_persistence.update_order_status(entry_order_id, "cancelled")
+                return None
 
             # Critical: Cancel if not filled within 60 seconds (scalp trading)
             if fill_state in ["TIMEOUT", "CANCELLED"]:

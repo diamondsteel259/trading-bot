@@ -76,10 +76,12 @@ class VALRTradingBot:
             
             # Initialize RSI scanner
             self.scanner = RSIScanner(self.api, self.config)
-            
+
             # Initialize trading engine
             self.trading_engine = VALRTradingEngine(self.api, self.config)
-            
+            # Set bot reference for shutdown detection
+            self.trading_engine.bot = self
+
             self.logger.info("VALR Trading Bot initialization complete")
             self.logger.info(f"Trading pairs: {', '.join(self.config.TRADING_PAIRS)}")
             self.logger.info(f"RSI threshold: {self.config.RSI_THRESHOLD}")
