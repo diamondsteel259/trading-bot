@@ -16,6 +16,7 @@ from logging_setup import get_logger, get_valr_logger
 from decimal_utils import DecimalUtils
 from order_persistence import get_order_persistence
 from position_persistence import get_position_persistence
+from position_recovery import recover_positions_from_valr
 
 
 class TradingError(Exception):
@@ -100,6 +101,15 @@ class PositionManager:
         if loaded_positions:
             self.active_positions = loaded_positions
             self.logger.info(f"Restored {len(loaded_positions)} positions from persistence")
+        else:
+            # No persisted positions - try to recover from VALR API
+            self.logger.info("No persisted positions found. Attempting recovery from VALR API...")
+            recovered = recover_positions_from_valr(self.api)
+            if recovered:
+                for position in recovered:
+                    self.active_positions[position["id"]] = position
+                self._save_positions()
+                self.logger.info(f"Recovered and saved {len(recovered)} positions from VALR")
 
     def _save_positions(self) -> None:
         """Save positions to persistence."""
