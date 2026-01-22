@@ -512,10 +512,28 @@ class VALRTradingEngine:
 
             self.logger.info(f"Entry filled: qty={formatted_filled_qty} @ {effective_entry_price}. Waiting for settlement...")
 
-            # CRITICAL: Wait for VALR to settle the coins into available balance (5 seconds)
-            # Without this delay, TP/SL orders fail with "Insufficient Balance" because coins aren't credited yet
-            time.sleep(5.0)
-            self.logger.info(f"Settlement delay complete. Placing TP/SL orders...")
+            # CRITICAL: Wait for VALR to settle the coins into available balance
+            # Poll balance with exponential backoff until coins appear or timeout (max 30 seconds)
+            base_currency = pair.replace("ZAR", "")
+            required_qty = filled_qty
+            max_wait = 30
+            start_wait = time.time()
+
+            while (time.time() - start_wait) < max_wait:
+                try:
+                    balance = self.get_available_balance(base_currency)
+                    if balance >= required_qty:
+                        self.logger.info(f"Settlement complete: {base_currency} balance={balance}, required={required_qty}")
+                        break
+                    self.logger.debug(f"Waiting for settlement: {base_currency} balance={balance}, required={required_qty}")
+                    time.sleep(2.0)
+                except Exception as e:
+                    self.logger.debug(f"Balance check failed during settlement wait: {e}")
+                    time.sleep(2.0)
+            else:
+                self.logger.warning(f"Settlement timeout after {max_wait}s. {base_currency} balance may be insufficient for TP/SL orders")
+
+            self.logger.info(f"Placing TP/SL orders...")
 
             # CRITICAL: Place TP/SL orders with validation - if either fails, close position immediately
             tp_order = None
