@@ -9,7 +9,7 @@ import time
 
 from valr_api import VALRAPI
 from config import Config
-from logging_setup import get_logger
+from logging_setup import get_logger, get_valr_logger
 from decimal_utils import DecimalUtils
 
 
@@ -26,6 +26,7 @@ class RSIScanner:
         self.api = api
         self.config = config
         self.logger = get_logger("rsi_scanner")
+        self.valr_logger = get_valr_logger()
         self.last_scan_times: Dict[str, datetime] = {}
         self.scan_cooldown_seconds = 300  # 5 minutes between scans per pair
     
@@ -93,7 +94,7 @@ class RSIScanner:
         
         # Log the scan result
         action = "BUY_SIGNAL" if is_oversold else "NO_SIGNAL"
-        self.logger.log_rsi_scan(pair, rsi_value, self.config.RSI_THRESHOLD, action)
+        self.valr_logger.log_rsi_scan(pair, rsi_value, self.config.RSI_THRESHOLD, action)
         
         return is_oversold, rsi_value
     

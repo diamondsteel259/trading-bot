@@ -153,3 +153,10 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
     if valr_logger is None:
         raise RuntimeError("Logging not initialized. Call setup_logging() first.")
     return valr_logger.get_logger(name)
+
+
+def get_valr_logger() -> VALRLogger:
+    """Get the VALRLogger instance with custom logging methods."""
+    if valr_logger is None:
+        raise RuntimeError("Logging not initialized. Call setup_logging() first.")
+    return valr_logger
