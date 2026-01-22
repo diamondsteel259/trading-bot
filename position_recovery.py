@@ -28,6 +28,13 @@ def recover_positions_from_valr(api: VALRAPI) -> List[Dict[str, Any]]:
         open_orders = api.get_open_orders()
         logger.info(f"Fetched {len(open_orders)} open orders from VALR for position recovery")
 
+        # DEBUG: Log all orders
+        for idx, order in enumerate(open_orders):
+            logger.info(f"Order {idx+1}: pair={order.get('currencyPair')}, side={order.get('side')}, "
+                       f"qty={order.get('originalQuantity') or order.get('quantity')}, "
+                       f"price={order.get('price') or order.get('limitPrice')}, "
+                       f"id={order.get('orderId') or order.get('id')}")
+
         if not open_orders:
             return []
 
