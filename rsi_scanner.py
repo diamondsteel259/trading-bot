@@ -101,15 +101,42 @@ class RSIScanner:
         if len(close_prices) >= min_candles:
             return close_prices
         
-        # If we don't have enough candles from aggregation, 
-        # fall back to using individual trade prices (tick-level)
+        # If we don't have enough candles from aggregation,
+        # fall back to using individual trade prices (tick-level) with validation
         if len(trades) >= min_candles:
             self.logger.debug(f"Not enough 1m candles ({len(close_prices)}), using tick-level prices")
+
+            # Validate tick-level data freshness (reject trades older than 5 minutes)
+            now_utc = datetime.now(timezone.utc)
+            max_age_seconds = 300  # 5 minutes
+
             tick_prices = []
             for trade in reversed(trades[-min_candles:]):  # Reverse to get oldest to newest
-                price = float(trade.get("price", 0))
-                if price > 0:
-                    tick_prices.append(price)
+                try:
+                    # Validate timestamp
+                    traded_at = trade.get("tradedAt", "")
+                    if traded_at:
+                        dt = datetime.fromisoformat(traded_at.replace("Z", "+00:00"))
+                        age_seconds = (now_utc - dt).total_seconds()
+
+                        if age_seconds > max_age_seconds:
+                            self.logger.debug(f"Skipping stale trade: {age_seconds:.0f}s old (>{max_age_seconds}s)")
+                            continue
+
+                    # Extract price
+                    price = float(trade.get("price", 0))
+                    if price > 0:
+                        tick_prices.append(price)
+
+                except Exception as e:
+                    self.logger.debug(f"Error validating trade data: {e}")
+                    continue
+
+            if len(tick_prices) < min_candles:
+                self.logger.warning(
+                    f"Only {len(tick_prices)} fresh trades available after validation (need {min_candles})"
+                )
+
             return tick_prices[-min_candles:] if len(tick_prices) >= min_candles else tick_prices
         
         return close_prices
@@ -143,7 +170,7 @@ class RSIScanner:
             
             if len(close_prices) >= min_candles:
                 self._price_history[pair] = close_prices
-                self.logger.info(f"Initialized {pair} with {len(close_prices)} candles ✅")
+                self.logger.info(f"Initialized {pair} with {len(close_prices)} candles")
                 return True
             else:
                 self.logger.warning(f"Only got {len(close_prices)} candles for {pair}, need {min_candles}")
@@ -235,8 +262,8 @@ class RSIScanner:
         # Detailed logging for debugging RSI triggers
         price_display = f"R{last_price:,.2f}" if last_price is not None else "Unknown"
         rsi_display = f"{rsi_value:.1f}" if rsi_value is not None else "None"
-        status_display = "YES ✅" if is_oversold else "NO ❌"
-        
+        status_display = "YES" if is_oversold else "NO"
+
         log_msg = f"{pair}: Price={price_display} | Candles={history_len} | RSI={rsi_display} | Oversold={status_display}"
         
         if not is_oversold:

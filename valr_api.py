@@ -293,7 +293,6 @@ class VALRAPI:
         summary = self.get_pair_summary(pair)
         for key in [
             "lastTradedPrice",
-            "lastTradedPrice",
             "lastPrice",
             "price",
             "last",
