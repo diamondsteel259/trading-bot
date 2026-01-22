@@ -510,7 +510,12 @@ class VALRTradingEngine:
             formatted_sl = DecimalUtils.format_price(sl_price, tick_size)
             formatted_filled_qty = DecimalUtils.format_quantity(filled_qty, qty_decimals)
 
-            self.logger.info(f"Entry filled: qty={formatted_filled_qty} @ {effective_entry_price}. Placing TP/SL...")
+            self.logger.info(f"Entry filled: qty={formatted_filled_qty} @ {effective_entry_price}. Waiting for settlement...")
+
+            # CRITICAL: Wait for VALR to settle the coins into available balance (5 seconds)
+            # Without this delay, TP/SL orders fail with "Insufficient Balance" because coins aren't credited yet
+            time.sleep(5.0)
+            self.logger.info(f"Settlement delay complete. Placing TP/SL orders...")
 
             # CRITICAL: Place TP/SL orders with validation - if either fails, close position immediately
             tp_order = None
