@@ -115,11 +115,11 @@ class PositionManager:
         """Save positions to persistence."""
         self.position_persistence.save_positions(self.active_positions)
 
-    def attach_exit_orders(self, position_id: str, tp_order_id: str, sl_order_id: str) -> None:
+    def attach_exit_orders(self, position_id: str, tp_order_id: Optional[str], sl_order_id: str) -> None:
         position = self.active_positions.get(position_id)
         if not position:
             return
-        position["take_profit_order_id"] = tp_order_id
+        position["take_profit_order_id"] = tp_order_id  # Can be None now
         position["stop_loss_order_id"] = sl_order_id
         self._save_positions()
 
@@ -160,6 +160,85 @@ class PositionManager:
 
     def get_open_positions(self) -> List[Dict[str, Any]]:
         return [pos for pos in self.active_positions.values() if pos.get("status") == "open"]
+
+    def check_take_profit_opportunities(self) -> List[str]:
+        """Check all active positions and close those that reached take-profit target.
+
+        Returns list of position IDs that were closed.
+
+        This replaces the removed TP limit orders by actively monitoring positions
+        and executing market sells when profit target is reached.
+        """
+        closed_positions = []
+
+        for position_id, position in list(self.active_positions.items()):
+            if position.get("status") != "open":
+                continue
+
+            pair = position.get("pair")
+            entry_price = position.get("entry_price")
+            tp_price = position.get("take_profit_price")
+            quantity = position.get("quantity")
+
+            if not all([pair, entry_price, tp_price, quantity]):
+                continue
+
+            try:
+                # Get current market price
+                order_book = self.api.get_order_book(pair)
+                bids = order_book.get("bids") or order_book.get("Bids") or []
+
+                if not bids:
+                    continue
+
+                current_bid = Decimal(str(bids[0]["price"]))
+
+                # Check if current price >= take-profit target
+                if current_bid >= tp_price:
+                    self.logger.info(
+                        f"Take-profit target reached for {pair}: "
+                        f"current={current_bid}, target={tp_price}, entry={entry_price}"
+                    )
+
+                    # Close position with market order
+                    try:
+                        qty_decimals = self.config.get_pair_quantity_decimals(pair)
+                        formatted_qty = DecimalUtils.format_quantity(quantity, qty_decimals)
+
+                        self.api.place_market_order(
+                            pair=pair,
+                            side="SELL",
+                            quantity=formatted_qty
+                        )
+
+                        # Cancel stop-loss order if it exists
+                        sl_order_id = position.get("stop_loss_order_id")
+                        if sl_order_id:
+                            try:
+                                self.api.cancel_order(sl_order_id, pair=pair)
+                            except Exception as cancel_error:
+                                self.logger.warning(f"Failed to cancel SL order {sl_order_id}: {cancel_error}")
+
+                        # Update position status
+                        position["status"] = "closed"
+                        position["exit_filled_at"] = datetime.now(timezone.utc)
+                        position["exit_reason"] = "take_profit_reached"
+
+                        closed_positions.append(position_id)
+
+                        self.logger.info(f"Successfully closed position {position_id} at take-profit")
+
+                    except Exception as close_error:
+                        self.logger.error(f"Failed to close position {position_id} at take-profit: {close_error}")
+
+            except Exception as e:
+                self.logger.error(f"Error checking take-profit for position {position_id}: {e}")
+                continue
+
+        if closed_positions:
+            self._save_positions()
+
+        return closed_positions
 
 
 class VALRTradingEngine:
@@ -379,14 +458,16 @@ class VALRTradingEngine:
 
     def execute_trade_setup(self, pair: str, rsi_value: float) -> Optional[str]:
         """Execute scalp trade setup with R30 position sizing.
-        
+
         For high-frequency scalp trading:
         1. Check ZAR balance (R30 + fees required)
-        2. Calculate quantity based on current price
-        3. Place post-only entry order (maker fees)
-        4. Wait 60s max for fill, cancel if not filled
-        5. If filled, place TP/SL orders at ±1.5%/-2.0%
-        6. Monitor position with 30-minute timeout
+        2. Place market order for immediate guaranteed fill (taker fees)
+        3. Wait for fill confirmation (2s timeout)
+        4. If filled, place stop-loss order at -2.5%
+        5. Monitor position for manual take-profit at +1.5%
+        6. SL protects downside, manual exit captures upside
+
+        Note: Only SL order placed due to VALR limitation (can't have both TP+SL on same balance)
         """
         try:
             if self._is_daily_limit_reached():
@@ -400,27 +481,21 @@ class VALRTradingEngine:
                 self.logger.warning(f"No order book available for {pair}")
                 return None
 
-            # For scalping: use ASK price to buy immediately at market
-            # This crosses the spread and fills instantly (taker fee)
+            # For scalping: use market orders for guaranteed immediate fill
+            # Market orders execute at best available price (typically within 1 tick of ask)
             entry_price = best_ask if best_ask is not None else best_bid
             if entry_price is None or entry_price <= 0:
                 return None
 
-            # Calculate R30 position sizing
+            # Calculate R30 position sizing (estimate for validation only, market order will use base_amount)
             trade_amount_quote = self.config.BASE_TRADE_AMOUNT
-            qty = trade_amount_quote / entry_price
 
-            tick_size = self.config.get_pair_tick_size(pair)
             qty_decimals = self.config.get_pair_quantity_decimals(pair)
 
-            formatted_price = DecimalUtils.format_price(entry_price, tick_size)
-            formatted_qty = DecimalUtils.format_quantity(qty, qty_decimals)
-
-            # Check balance: R30 + 0.5% taker fee + safety buffer = R30.15 + 0.05
-            # Using taker fee for scalping (immediate fills instead of post-only)
+            # Check balance: R30 + taker fee (from config) + safety buffer
+            # Market orders use VALR taker fee (0.35% based on config)
             BALANCE_SAFETY_BUFFER = Decimal("0.05")  # 5 cents safety margin
-            TAKER_FEE_PERCENT = Decimal("0.5")  # VALR taker fee
-            required_quote = trade_amount_quote + (trade_amount_quote * (TAKER_FEE_PERCENT / Decimal("100"))) + BALANCE_SAFETY_BUFFER
+            required_quote = trade_amount_quote + (trade_amount_quote * (self.config.TAKER_FEE_PERCENT / Decimal("100"))) + BALANCE_SAFETY_BUFFER
 
             if not self.check_balance(quote_currency, required_quote):
                 available = self.get_available_balance(quote_currency)
@@ -433,17 +508,16 @@ class VALRTradingEngine:
                 )
 
             self.logger.info(
-                f"Oversold signal {pair}: RSI={rsi_value:.2f}. Placing R30 entry @ {formatted_price} (immediate fill)"
+                f"Oversold signal {pair}: RSI={rsi_value:.2f}. Placing R{trade_amount_quote} entry (market order)"
             )
 
-            # Place limit order at ASK for immediate fill (taker fee ~0.5%)
-            # For scalping: immediate fills more important than saving 0.3% on fees
-            entry_order_result = self.api.place_limit_order(
+            # Use market order for guaranteed immediate fill
+            # Accepts current best ask (market price) automatically
+            # Higher fee (0.35% taker) but eliminates timeout issues
+            entry_order_result = self.api.place_market_order(
                 pair=pair,
                 side="BUY",
-                quantity=formatted_qty,
-                price=formatted_price,
-                post_only=False,  # Allow immediate fill for scalping
+                base_amount=str(trade_amount_quote),  # R30 in quote currency
             )
 
             # CRITICAL: Wait 1 second after order placement to avoid 404 errors when checking status
@@ -458,8 +532,8 @@ class VALRTradingEngine:
                 order_id=entry_order_id,
                 pair=pair,
                 side="buy",
-                quantity=Decimal(formatted_qty),
-                entry_price=Decimal(formatted_price),
+                quantity=Decimal(str(trade_amount_quote)),  # Market order uses base_amount
+                entry_price=entry_price,  # Estimated price
                 order_type="entry",
             )
 
@@ -468,16 +542,15 @@ class VALRTradingEngine:
                 order_id=entry_order_id,
                 pair=pair,
                 side="buy",
-                quantity=float(Decimal(formatted_qty)),
-                price=float(Decimal(formatted_price)),
+                quantity=float(trade_amount_quote),
+                price=float(entry_price),
                 status="PENDING",
             )
 
-            # For scalping with immediate fills, check after 5 seconds
-            # Orders at ASK price should fill within 1-2 seconds
-            self.logger.info(f"Waiting for entry fill (5s timeout for immediate execution)...")
+            # Market orders fill instantly, check after 2 seconds for API propagation
+            self.logger.info(f"Waiting for market order fill (2s timeout)...")
             fill_state, filled_qty, avg_fill_price = self._wait_for_order_fill(
-                entry_order_id, pair=pair, timeout_seconds=5
+                entry_order_id, pair=pair, timeout_seconds=2
             )
 
             # Critical: Handle shutdown signal immediately
@@ -533,63 +606,20 @@ class VALRTradingEngine:
             formatted_tp = DecimalUtils.format_price(tp_price, tick_size)
             formatted_sl = DecimalUtils.format_price(sl_price, tick_size)
 
-            # CRITICAL: Place TP/SL orders with validation - if either fails, close position immediately
-            tp_order = None
-            sl_order = None
-            tp_order_id = ""
+            # Place only Stop-Loss order to protect against downside
+            # Take-profit will be handled manually via position monitoring
+            # This avoids VALR's limitation of not supporting multiple sell orders on same balance
             sl_order_id = ""
-
             try:
-                # Place TP order (+1.5% profit target) - not post-only for quick execution
-                tp_order = self.api.place_limit_order(
-                    pair=pair,
-                    side="SELL",
-                    quantity=formatted_filled_qty,
-                    price=formatted_tp,
-                    post_only=False,  # Need immediate execution
-                )
-
-                # CRITICAL: Wait 1 second after order placement to avoid 404 errors
-                time.sleep(1.0)
-
-                tp_order_id = str(tp_order.get("id") or tp_order.get("orderId") or "")
-
-                if not tp_order_id:
-                    raise TradingError("TP order placement returned no order ID")
-
-                # Verify order was accepted
-                try:
-                    tp_status_check = self.api.get_order_status(tp_order_id, pair=pair)
-                    tp_status_type = tp_status_check.get("orderStatusType", "")
-                    if tp_status_type == "Failed":
-                        fail_reason = tp_status_check.get("failedReason", "Unknown")
-                        raise TradingError(f"TP order failed: {fail_reason}")
-                except TradingError:
-                    raise
-                except Exception as check_error:
-                    self.logger.warning(f"Could not verify TP order status: {check_error}")
-
-            except Exception as e:
-                self.logger.error(f"CRITICAL: Failed to place TP order for {pair}: {e}. Closing entry position immediately.")
-                # Close entry position at market - we cannot hold unprotected position
-                try:
-                    self.api.place_market_order(pair=pair, side="SELL", quantity=formatted_filled_qty)
-                except Exception as close_error:
-                    self.logger.error(f"CRITICAL: Failed to close unprotected position for {pair}: {close_error}")
-                self.order_persistence.update_order_status(entry_order_id, "closed")
-                return None
-
-            try:
-                # Place SL order (-2.0% stop loss) - not post-only for quick execution
+                # Place stop-loss order to protect against 2.5% downside
                 sl_order = self.api.place_limit_order(
                     pair=pair,
                     side="SELL",
                     quantity=formatted_filled_qty,
                     price=formatted_sl,
-                    post_only=False,  # Need immediate execution
+                    post_only=False,
                 )
 
-                # CRITICAL: Wait 1 second after order placement to avoid 404 errors
                 time.sleep(1.0)
 
                 sl_order_id = str(sl_order.get("id") or sl_order.get("orderId") or "")
@@ -598,41 +628,23 @@ class VALRTradingEngine:
                     raise TradingError("SL order placement returned no order ID")
 
                 # Verify order was accepted
-                try:
-                    sl_status_check = self.api.get_order_status(sl_order_id, pair=pair)
-                    sl_status_type = sl_status_check.get("orderStatusType", "")
-                    if sl_status_type == "Failed":
-                        fail_reason = sl_status_check.get("failedReason", "Unknown")
-                        raise TradingError(f"SL order failed: {fail_reason}")
-                except TradingError:
-                    raise
-                except Exception as check_error:
-                    self.logger.warning(f"Could not verify SL order status: {check_error}")
+                sl_status_check = self.api.get_order_status(sl_order_id, pair=pair)
+                sl_status_type = sl_status_check.get("orderStatusType", "")
+                if sl_status_type == "Failed":
+                    fail_reason = sl_status_check.get("failedReason", "Unknown")
+                    raise TradingError(f"SL order failed: {fail_reason}")
 
             except Exception as e:
-                self.logger.error(f"CRITICAL: Failed to place SL order for {pair}: {e}. Cancelling TP and closing position.")
-                # Cancel TP order and close entry position - cannot hold position without stop loss
+                self.logger.error(f"CRITICAL: Failed to place SL order for {pair}: {e}. Closing position immediately.")
+                # Close position at market - cannot hold unprotected position
                 try:
-                    if tp_order_id:
-                        self.api.cancel_order(tp_order_id, pair=pair)
                     self.api.place_market_order(pair=pair, side="SELL", quantity=formatted_filled_qty)
+                    self.order_persistence.update_order_status(entry_order_id, "closed")
                 except Exception as close_error:
                     self.logger.error(f"CRITICAL: Failed to close unprotected position for {pair}: {close_error}")
-                self.order_persistence.update_order_status(entry_order_id, "closed")
-                if tp_order_id:
-                    self.order_persistence.update_order_status(tp_order_id, "cancelled")
                 return None
 
-            if tp_order_id:
-                self.order_persistence.add_order(
-                    order_id=tp_order_id,
-                    pair=pair,
-                    side="sell",
-                    quantity=Decimal(formatted_filled_qty),
-                    entry_price=Decimal(formatted_tp),
-                    order_type="take_profit",
-                )
-
+            # Record stop-loss order
             if sl_order_id:
                 self.order_persistence.add_order(
                     order_id=sl_order_id,
@@ -649,15 +661,16 @@ class VALRTradingEngine:
                 entry_price=effective_entry_price,
                 entry_order_id=entry_order_id,
                 stop_loss_price=Decimal(formatted_sl),
-                take_profit_price=Decimal(formatted_tp),
+                take_profit_price=Decimal(formatted_tp),  # Still calculate TP for monitoring, just don't place order
                 entry_filled_at=datetime.now(timezone.utc),
             )
-            if tp_order_id and sl_order_id:
-                self.position_manager.attach_exit_orders(position_id, tp_order_id, sl_order_id)
+            # Attach only stop-loss order (no TP order placed)
+            if sl_order_id:
+                self.position_manager.attach_exit_orders(position_id, None, sl_order_id)
 
             self._increment_trade_count()
 
-            self.logger.info(f"Position active for {pair}: TP={formatted_tp} SL={formatted_sl}")
+            self.logger.info(f"Position active for {pair}: SL={formatted_sl} (TP monitoring active @ {formatted_tp})")
             return entry_order_id
 
         except InsufficientBalanceError as e:

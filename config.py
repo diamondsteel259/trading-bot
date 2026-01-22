@@ -155,7 +155,7 @@ class Config:
         self.RSI_PAIR_COOLDOWN_SECONDS = int(os.getenv("RSI_PAIR_COOLDOWN_SECONDS", "20"))
 
         # Amounts / fees
-        self.BASE_TRADE_AMOUNT = Decimal(os.getenv("BASE_TRADE_AMOUNT", "30.0"))
+        self.BASE_TRADE_AMOUNT = Decimal(os.getenv("BASE_TRADE_AMOUNT", "100.0"))
         self.MAKER_FEE_PERCENT = Decimal(os.getenv("MAKER_FEE_PERCENT", "0.18"))
         self.TAKER_FEE_PERCENT = Decimal(os.getenv("TAKER_FEE_PERCENT", "0.35"))
 

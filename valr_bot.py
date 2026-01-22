@@ -180,7 +180,15 @@ class VALRTradingBot:
         """Monitor open positions and check for exit conditions."""
         try:
             self.trading_engine.monitor_positions()
-            
+
+            # Check for take-profit opportunities (manual TP since we can't place TP+SL orders together)
+            try:
+                closed_positions = self.trading_engine.position_manager.check_take_profit_opportunities()
+                if closed_positions:
+                    self.logger.info(f"Closed {len(closed_positions)} positions at take-profit")
+            except Exception as e:
+                self.logger.error(f"Error checking take-profit opportunities: {e}")
+
             # Log trading statistics periodically
             stats = self.trading_engine.get_trading_statistics()
             if stats["open_positions"] > 0 or stats["trades_today"] > 0:
@@ -188,7 +196,7 @@ class VALRTradingBot:
                     f"Trading stats: {stats['trades_today']}/{stats['max_daily_trades']} trades, "
                     f"{stats['open_positions']} open positions"
                 )
-            
+
         except Exception as e:
             self.logger.error(f"Error monitoring positions: {e}")
     
