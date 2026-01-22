@@ -142,7 +142,7 @@ class Config:
         self.TRADING_PAIRS = [pair.strip() for pair in self.TRADING_PAIRS if pair.strip()]
 
         self.RSI_THRESHOLD = float(os.getenv("RSI_THRESHOLD", "45.0"))
-        self.TAKE_PROFIT_PERCENTAGE = float(os.getenv("TAKE_PROFIT_PERCENTAGE", "1.5"))
+        self.TAKE_PROFIT_PERCENTAGE = float(os.getenv("TAKE_PROFIT_PERCENTAGE", "2.0"))
         self.STOP_LOSS_PERCENTAGE = float(os.getenv("STOP_LOSS_PERCENTAGE", "2.0"))
 
         # Scalp-specific timing
