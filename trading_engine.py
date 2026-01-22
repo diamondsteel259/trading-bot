@@ -327,9 +327,9 @@ class VALRTradingEngine:
                 self.logger.warning(f"No order book available for {pair}")
                 return None
 
-            # For post-only BUY orders, use BID price (or below) to act as maker
-            # Using ASK would cross the spread and get rejected by post-only flag
-            entry_price = best_bid if best_bid is not None else best_ask
+            # For scalping: use ASK price to buy immediately at market
+            # This crosses the spread and fills instantly (taker fee)
+            entry_price = best_ask if best_ask is not None else best_bid
             if entry_price is None or entry_price <= 0:
                 return None
 
@@ -343,10 +343,11 @@ class VALRTradingEngine:
             formatted_price = DecimalUtils.format_price(entry_price, price_decimals)
             formatted_qty = DecimalUtils.format_quantity(qty, qty_decimals)
 
-            # Check balance: R30 + 0.18% maker fee + safety buffer = R30.054 + 0.05
-            # Safety buffer prevents order rejection due to API precision differences
+            # Check balance: R30 + 0.5% taker fee + safety buffer = R30.15 + 0.05
+            # Using taker fee for scalping (immediate fills instead of post-only)
             BALANCE_SAFETY_BUFFER = Decimal("0.05")  # 5 cents safety margin
-            required_quote = trade_amount_quote + (trade_amount_quote * (self.config.MAKER_FEE_PERCENT / Decimal("100"))) + BALANCE_SAFETY_BUFFER
+            TAKER_FEE_PERCENT = Decimal("0.5")  # VALR taker fee
+            required_quote = trade_amount_quote + (trade_amount_quote * (TAKER_FEE_PERCENT / Decimal("100"))) + BALANCE_SAFETY_BUFFER
 
             if not self.check_balance(quote_currency, required_quote):
                 available = self.get_available_balance(quote_currency)
@@ -359,16 +360,17 @@ class VALRTradingEngine:
                 )
 
             self.logger.info(
-                f"Oversold signal {pair}: RSI={rsi_value:.2f}. Placing R30 entry @ {formatted_price}"
+                f"Oversold signal {pair}: RSI={rsi_value:.2f}. Placing R30 entry @ {formatted_price} (immediate fill)"
             )
 
-            # Place post-only entry order for maker fees (0.18%)
+            # Place limit order at ASK for immediate fill (taker fee ~0.5%)
+            # For scalping: immediate fills more important than saving 0.3% on fees
             entry_order_result = self.api.place_limit_order(
                 pair=pair,
                 side="BUY",
                 quantity=formatted_qty,
                 price=formatted_price,
-                post_only=True,  # Critical for scalp trading fees
+                post_only=False,  # Allow immediate fill for scalping
             )
             entry_order_id = str(entry_order_result.get("id") or entry_order_result.get("orderId") or "")
             if not entry_order_id:
@@ -394,9 +396,11 @@ class VALRTradingEngine:
                 status="PENDING",
             )
 
-            self.logger.info(f"Waiting for entry fill ({self.config.ENTRY_ORDER_TIMEOUT_SECONDS}s timeout)...")
+            # For scalping with immediate fills, check after 5 seconds
+            # Orders at ASK price should fill within 1-2 seconds
+            self.logger.info(f"Waiting for entry fill (5s timeout for immediate execution)...")
             fill_state, filled_qty, avg_fill_price = self._wait_for_order_fill(
-                entry_order_id, pair=pair, timeout_seconds=self.config.ENTRY_ORDER_TIMEOUT_SECONDS
+                entry_order_id, pair=pair, timeout_seconds=5
             )
 
             # Critical: Handle shutdown signal immediately
@@ -410,9 +414,9 @@ class VALRTradingEngine:
                     self.order_persistence.update_order_status(entry_order_id, "cancelled")
                 return None
 
-            # Critical: Cancel if not filled within 60 seconds (scalp trading)
+            # Critical: Cancel if not filled within 5 seconds (scalp trading with immediate fills)
             if fill_state in ["TIMEOUT", "CANCELLED"]:
-                self.logger.info(f"Entry order not filled ({fill_state}). Cancelling {entry_order_id}...")
+                self.logger.warning(f"Entry order not filled ({fill_state}) - market may have moved. Cancelling {entry_order_id}...")
                 try:
                     self.api.cancel_order(entry_order_id, pair=pair)
                 finally:
