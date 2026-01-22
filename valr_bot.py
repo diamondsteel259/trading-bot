@@ -31,8 +31,8 @@ class VALRTradingBot:
         self.trading_engine = None
         self.logger = None
         self.running = False
-        self.scan_interval_seconds = 300  # 5 minutes between full scans
-        self.monitor_interval_seconds = 60  # 1 minute between position monitoring
+        self.scan_interval_seconds = 60  # Updated from config during initialization
+        self.monitor_interval_seconds = 5  # Updated from config during initialization
         
         # Signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -53,6 +53,10 @@ class VALRTradingBot:
             # Setup logging
             self.logger = setup_logging(self.config).get_logger()
             self.logger.info("Starting VALR Trading Bot initialization...")
+
+            # Apply runtime intervals from config
+            self.scan_interval_seconds = self.config.SCAN_INTERVAL_SECONDS
+            self.monitor_interval_seconds = self.config.POSITION_MONITOR_INTERVAL_SECONDS
             
             # Initialize order persistence
             self.order_persistence = initialize_order_persistence(self.config)
@@ -60,10 +64,15 @@ class VALRTradingBot:
             # Initialize VALR API client
             self.api = VALRAPI(self.config)
             
-            # Test API connection
+            # Test API connection (authenticated call)
             self.logger.info("Testing VALR API connection...")
-            server_time = self.api.get_server_time()
-            self.logger.info(f"VALR server time: {server_time}")
+            _ = self.api.get_server_time()
+            balances = self.api.get_account_balances()
+            zar_balance = balances.get("ZAR")
+            if zar_balance is not None:
+                self.logger.info(f"API Connection successful | ZAR available: {zar_balance}")
+            else:
+                self.logger.info("API Connection successful")
             
             # Initialize RSI scanner
             self.scanner = RSIScanner(self.api, self.config)
@@ -117,7 +126,7 @@ class VALRTradingBot:
                     self._cleanup_old_orders()
                 
                 # Brief sleep to prevent tight loops
-                time.sleep(5)
+                time.sleep(1)
                 
         except KeyboardInterrupt:
             self.logger.info("Keyboard interrupt received")
@@ -156,7 +165,7 @@ class VALRTradingBot:
                     else:
                         self.logger.warning(f"Failed to initiate trade for {pair}")
                 
-                time.sleep(0.5)  # Small delay between pairs
+                time.sleep(0.1)  # Small delay between pairs
             
             # Log scan statistics
             oversold_count = sum(1 for r in scan_results if r.get("is_oversold", False))

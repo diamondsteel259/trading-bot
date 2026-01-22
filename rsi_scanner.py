@@ -1,10 +1,16 @@
-"""
-RSI scanner for VALR trading bot.
-Identifies oversold conditions in trading pairs using RSI indicators.
+"""RSI scanner for VALR trading bot.
+
+For high-frequency scalping, this module computes RSI locally using a rolling
+window of last traded prices.
+
+VALR's indicator endpoints are not consistently available across accounts/API
+revisions; using market summary pricing is more reliable.
 """
 
+from __future__ import annotations
+
 from typing import List, Dict, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime
 import time
 
 from valr_api import VALRAPI
@@ -15,218 +21,188 @@ from decimal_utils import DecimalUtils
 
 class RSIScannerError(Exception):
     """Raised when RSI scanning operations fail."""
-    pass
 
 
 class RSIScanner:
     """RSI scanner for identifying oversold trading opportunities."""
-    
+
     def __init__(self, api: VALRAPI, config: Config):
-        """Initialize RSI scanner."""
         self.api = api
         self.config = config
         self.logger = get_logger("rsi_scanner")
         self.valr_logger = get_valr_logger()
+
         self.last_scan_times: Dict[str, datetime] = {}
-        self.scan_cooldown_seconds = 300  # 5 minutes between scans per pair
-    
-    def get_rsi(self, pair: str, interval: str = "1m", limit: int = 100) -> Optional[float]:
-        """
-        Get the latest RSI value for a trading pair.
-        
-        Args:
-            pair: Trading pair symbol (e.g., 'BTCZAR')
-            interval: Time interval ('1m', '5m', '15m', '1h', '4h', '1d')
-            limit: Number of data points to retrieve
-            
-        Returns:
-            Latest RSI value or None if unavailable
-        """
+        self.scan_cooldown_seconds = config.RSI_PAIR_COOLDOWN_SECONDS
+
+        self._price_history: Dict[str, List[float]] = {}
+        self._max_history = 200
+
+    def _add_price_point(self, pair: str, price: float) -> None:
+        history = self._price_history.setdefault(pair, [])
+        history.append(price)
+        if len(history) > self._max_history:
+            self._price_history[pair] = history[-self._max_history :]
+
+    def _calculate_rsi(self, prices: List[float], period: int = 14) -> Optional[float]:
+        if len(prices) < period + 1:
+            return None
+
+        deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+        gains = [max(d, 0.0) for d in deltas]
+        losses = [max(-d, 0.0) for d in deltas]
+
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+
+        for i in range(period, len(deltas)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+        if avg_loss == 0:
+            return 100.0
+
+        rs = avg_gain / avg_loss
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        return rsi
+
+    def get_rsi(self, pair: str, period: int = 14) -> Optional[float]:
         try:
-            self.logger.debug(f"Fetching RSI data for {pair} (interval: {interval})")
-            
-            rsi_data = self.api.get_rsi_data(pair, interval, limit)
-            
-            if not rsi_data:
-                self.logger.warning(f"No RSI data available for {pair}")
+            last_price = float(self.api.get_last_traded_price(pair))
+            if last_price <= 0:
                 return None
-            
-            # Get the most recent RSI value
-            latest_rsi = rsi_data[-1]
-            rsi_value = latest_rsi.get('value')
-            
-            if rsi_value is None:
-                self.logger.warning(f"RSI value is None for {pair}")
-                return None
-            
-            return float(rsi_value)
-            
+
+            self._add_price_point(pair, last_price)
+            history = self._price_history.get(pair, [])
+            return self._calculate_rsi(history, period=period)
         except Exception as e:
             self.logger.error(f"Failed to get RSI for {pair}: {e}")
             return None
-    
-    def scan_pair(self, pair: str, interval: str = "1m") -> Tuple[bool, Optional[float]]:
-        """
-        Scan a single trading pair for oversold conditions.
-        
-        Args:
-            pair: Trading pair symbol
-            interval: Time interval for RSI calculation
-            
-        Returns:
-            Tuple of (is_oversold, rsi_value)
-        """
-        # Check cooldown for this pair
+
+    def scan_pair(self, pair: str) -> Tuple[bool, Optional[float]]:
         if self._is_in_cooldown(pair):
             self.logger.debug(f"Pair {pair} is in cooldown, skipping scan")
             return False, None
-        
-        rsi_value = self.get_rsi(pair, interval)
-        
+
+        rsi_value = self.get_rsi(pair)
         if rsi_value is None:
             return False, None
-        
-        # Update last scan time
+
         self.last_scan_times[pair] = datetime.now()
-        
-        # Check if oversold (RSI < threshold)
+
         is_oversold = rsi_value < self.config.RSI_THRESHOLD
-        
-        # Log the scan result
         action = "BUY_SIGNAL" if is_oversold else "NO_SIGNAL"
         self.valr_logger.log_rsi_scan(pair, rsi_value, self.config.RSI_THRESHOLD, action)
-        
+
         return is_oversold, rsi_value
-    
-    def scan_pairs(self, pairs: Optional[List[str]] = None, interval: str = "1m") -> List[Dict]:
-        """
-        Scan multiple trading pairs for oversold conditions.
-        
-        Args:
-            pairs: List of trading pairs to scan. Uses config.TRADING_PAIRS if None.
-            interval: Time interval for RSI calculation
-            
-        Returns:
-            List of scan results with pair, RSI value, and oversold status
-        """
+
+    def scan_pairs(self, pairs: Optional[List[str]] = None) -> List[Dict]:
         if pairs is None:
             pairs = self.config.TRADING_PAIRS
-        
+
         self.logger.info(f"Scanning {len(pairs)} pairs for oversold conditions")
-        
-        results = []
+
+        results: List[Dict] = []
         for pair in pairs:
             try:
-                is_oversold, rsi_value = self.scan_pair(pair, interval)
-                
-                results.append({
-                    "pair": pair,
-                    "rsi_value": rsi_value,
-                    "is_oversold": is_oversold,
-                    "threshold": self.config.RSI_THRESHOLD,
-                    "timestamp": datetime.now().isoformat()
-                })
-                
-                # Small delay between pairs to avoid overwhelming the API
-                time.sleep(0.1)
-                
+                is_oversold, rsi_value = self.scan_pair(pair)
+                results.append(
+                    {
+                        "pair": pair,
+                        "rsi_value": rsi_value,
+                        "is_oversold": is_oversold,
+                        "threshold": self.config.RSI_THRESHOLD,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
+                time.sleep(0.05)
             except Exception as e:
                 self.logger.error(f"Failed to scan pair {pair}: {e}")
-                results.append({
-                    "pair": pair,
-                    "rsi_value": None,
-                    "is_oversold": False,
-                    "error": str(e),
-                    "timestamp": datetime.now().isoformat()
-                })
-        
+                results.append(
+                    {
+                        "pair": pair,
+                        "rsi_value": None,
+                        "is_oversold": False,
+                        "error": str(e),
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                )
+
         oversold_count = sum(1 for result in results if result.get("is_oversold", False))
         self.logger.info(f"RSI scan complete: {oversold_count}/{len(pairs)} pairs oversold")
-        
+
         return results
-    
+
+    def _extract_levels(self, order_book: Dict, key: str) -> List[Dict]:
+        for k in [key, key.capitalize(), key.upper()]:
+            levels = order_book.get(k)
+            if isinstance(levels, list):
+                return [lvl for lvl in levels if isinstance(lvl, dict)]
+        return []
+
     def find_best_entry(self, pair: str) -> Optional[Dict]:
-        """
-        Find the best entry price for a trading pair using order book analysis.
-        
-        Args:
-            pair: Trading pair symbol
-            
-        Returns:
-            Dictionary with entry price and quantity information, or None
-        """
         try:
-            # Get order book for the pair
-            order_book = self.api.get_order_book(pair, "both")
-            
-            # Get the best ask price (for buying)
-            asks = order_book.get('asks', [])
-            bids = order_book.get('bids', [])
-            
-            if not asks:
-                self.logger.warning(f"No asks available for {pair}")
+            order_book = self.api.get_order_book(pair)
+            asks = self._extract_levels(order_book, "asks")
+            bids = self._extract_levels(order_book, "bids")
+
+            if not asks and not bids:
+                self.logger.warning(f"No order book levels available for {pair}")
                 return None
-            
-            # Use the best ask price (lowest price to buy)
-            best_ask = asks[0]  # Asks are sorted from lowest to highest
-            best_bid = bids[0] if bids else None
-            
-            # Calculate recommended entry (slightly below best ask for better price)
-            best_ask_price = float(best_ask['price'])
-            recommended_entry = best_ask_price * 0.999  # 0.1% below market
-            
-            # Calculate quantity based on base trade amount
-            quantity = self.config.BASE_TRADE_AMOUNT / Decimal(str(recommended_entry))
-            
-            # Format according to pair precision
-            price_decimals = self.config.get_pair_decimals(pair)
-            quantity_decimals = 8  # Most crypto pairs support 8 decimal places
-            
-            formatted_quantity = DecimalUtils.format_quantity(quantity, quantity_decimals)
+
+            best_ask_price = float(asks[0]["price"]) if asks else None
+            best_bid_price = float(bids[0]["price"]) if bids else None
+
+            if best_bid_price is not None:
+                recommended_entry = best_bid_price
+            elif best_ask_price is not None:
+                recommended_entry = best_ask_price * 0.999
+            else:
+                return None
+
+            trade_amount_quote = self.config.BASE_TRADE_AMOUNT
+            quantity = trade_amount_quote / DecimalUtils.to_decimal(recommended_entry)
+
+            price_decimals = self.config.get_pair_price_decimals(pair)
+            qty_decimals = self.config.get_pair_quantity_decimals(pair)
+
+            formatted_quantity = DecimalUtils.format_quantity(quantity, qty_decimals)
             formatted_price = DecimalUtils.format_price(recommended_entry, price_decimals)
-            
+
             return {
                 "pair": pair,
-                "current_price": best_ask_price,
-                "best_bid": float(best_bid['price']) if best_bid else None,
+                "best_bid": best_bid_price,
                 "best_ask": best_ask_price,
                 "recommended_entry": float(formatted_price),
                 "formatted_quantity": formatted_quantity,
                 "formatted_price": formatted_price,
-                "available_ask_quantity": float(best_ask.get('quantity', '0'))
             }
-            
+
         except Exception as e:
             self.logger.error(f"Failed to analyze entry for {pair}: {e}")
             return None
-    
+
     def _is_in_cooldown(self, pair: str) -> bool:
-        """Check if a pair is in cooldown period."""
-        if pair not in self.last_scan_times:
+        if self.scan_cooldown_seconds <= 0:
             return False
-        
-        time_since_last_scan = datetime.now() - self.last_scan_times[pair]
-        return time_since_last_scan.total_seconds() < self.scan_cooldown_seconds
-    
+        last_scan = self.last_scan_times.get(pair)
+        if not last_scan:
+            return False
+        return (datetime.now() - last_scan).total_seconds() < self.scan_cooldown_seconds
+
     def get_scan_statistics(self) -> Dict:
-        """Get statistics about RSI scanning."""
         now = datetime.now()
-        
-        # Calculate scan frequency per pair
-        scan_frequencies = {}
-        for pair, last_scan in self.last_scan_times.items():
-            time_diff = (now - last_scan).total_seconds()
-            scan_frequencies[pair] = time_diff
-        
+        scan_ages = {pair: (now - ts).total_seconds() for pair, ts in self.last_scan_times.items()}
+
         return {
             "total_pairs_scanned": len(self.last_scan_times),
-            "pairs_in_cooldown": sum(1 for freq in scan_frequencies.values() if freq < self.scan_cooldown_seconds),
+            "pairs_in_cooldown": sum(1 for age in scan_ages.values() if age < self.scan_cooldown_seconds),
             "scan_cooldown_seconds": self.scan_cooldown_seconds,
-            "last_scan_times": {pair: last_scan.isoformat() for pair, last_scan in self.last_scan_times.items()},
-            "scan_frequencies_seconds": scan_frequencies
+            "last_scan_times": {pair: ts.isoformat() for pair, ts in self.last_scan_times.items()},
+            "scan_ages_seconds": scan_ages,
+            "price_history_lengths": {pair: len(hist) for pair, hist in self._price_history.items()},
         }
-    
+
     def reset_cooldowns(self) -> None:
-        """Reset all cooldowns (useful for testing or manual intervention)."""
         self.last_scan_times.clear()
         self.logger.info("Reset all RSI scan cooldowns")

@@ -21,7 +21,7 @@ class DecimalUtils:
     def format_price(price: Union[str, float, int, Decimal], decimals: int = 6) -> str:
         """Format price with specified decimal places."""
         decimal_price = DecimalUtils.to_decimal(price)
-        return str(decimal_price.quantize(Decimal('1.' + '0' * decimals)))
+        return str(decimal_price.quantize(Decimal('1.' + '0' * decimals), rounding=ROUND_DOWN))
     
     @staticmethod
     def format_quantity(quantity: Union[str, float, int, Decimal], decimals: int = 8) -> str:
