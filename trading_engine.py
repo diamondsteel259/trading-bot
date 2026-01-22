@@ -430,9 +430,15 @@ class VALRTradingEngine:
                 finally:
                     self.order_persistence.update_order_status(entry_order_id, "filled")
 
+            # If order filled but quantity extraction failed, use the original order quantity
+            # This happens when fills endpoint returns 404 immediately after fill
             if filled_qty <= 0:
-                self.logger.warning(f"Entry order marked {fill_state} but filled qty is {filled_qty}.")
-                return None
+                self.logger.warning(
+                    f"Entry order marked {fill_state} but couldn't extract filled qty. "
+                    f"Using original order quantity: {formatted_qty}"
+                )
+                filled_qty = Decimal(formatted_qty)
+                avg_fill_price = Decimal(formatted_price)
 
             self.order_persistence.update_order_status(entry_order_id, "filled")
             effective_entry_price = avg_fill_price or Decimal(formatted_price)
