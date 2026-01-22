@@ -6,7 +6,7 @@ Coordinates all components and implements the main trading loop.
 import signal
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import os
 import threading
@@ -103,13 +103,13 @@ class VALRTradingBot:
         
         self.running = True
         self.logger.info("Starting VALR Trading Bot main loop...")
-        
-        last_scan_time = datetime.now() - timedelta(seconds=self.scan_interval_seconds)
-        last_monitor_time = datetime.now() - timedelta(seconds=self.monitor_interval_seconds)
-        
+
+        last_scan_time = datetime.now(timezone.utc) - timedelta(seconds=self.scan_interval_seconds)
+        last_monitor_time = datetime.now(timezone.utc) - timedelta(seconds=self.monitor_interval_seconds)
+
         try:
             while self.running:
-                current_time = datetime.now()
+                current_time = datetime.now(timezone.utc)
                 
                 # Position monitoring (more frequent)
                 if (current_time - last_monitor_time).total_seconds() >= self.monitor_interval_seconds:
