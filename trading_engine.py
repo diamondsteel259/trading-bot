@@ -500,19 +500,28 @@ class VALRTradingEngine:
                     self.order_persistence.update_order_status(entry_order_id, "cancelled")
                 return None
 
-            # Verify we actually got filled quantity - if not, order didn't really fill
-            if filled_qty <= 0:
-                self.logger.error(f"Order {entry_order_id} marked FILLED but qty=0. Cancelling...")
-                try:
-                    self.api.cancel_order(entry_order_id, pair=pair)
-                finally:
-                    self.order_persistence.update_order_status(entry_order_id, "cancelled")
-                return None
-
             self.order_persistence.update_order_status(entry_order_id, "filled")
             effective_entry_price = avg_fill_price or Decimal(formatted_price)
 
-            # Calculate TP/SL prices for scalp trading
+            # SIMPLE: Wait 5 seconds for settlement, then check actual wallet balance
+            self.logger.info(f"Entry order filled. Waiting 5s for settlement...")
+            time.sleep(5.0)
+
+            # Check actual wallet balance to get exact filled quantity
+            base_currency = pair.replace("ZAR", "")
+            actual_balance = self.get_available_balance(base_currency)
+
+            if actual_balance <= 0:
+                self.logger.error(f"No {base_currency} balance after order fill. Order may not have filled.")
+                return None
+
+            self.logger.info(f"Balance confirmed: {base_currency}={actual_balance}. Placing TP/SL...")
+
+            # Use actual balance as quantity for TP/SL orders
+            filled_qty = actual_balance
+            formatted_filled_qty = DecimalUtils.format_quantity(filled_qty, qty_decimals)
+
+            # Calculate TP/SL prices
             tp_price = DecimalUtils.calculate_take_profit_price(
                 effective_entry_price, self.config.TAKE_PROFIT_PERCENTAGE
             )
@@ -523,42 +532,6 @@ class VALRTradingEngine:
             tick_size = self.config.get_pair_tick_size(pair)
             formatted_tp = DecimalUtils.format_price(tp_price, tick_size)
             formatted_sl = DecimalUtils.format_price(sl_price, tick_size)
-            formatted_filled_qty = DecimalUtils.format_quantity(filled_qty, qty_decimals)
-
-            self.logger.info(f"Entry filled: qty={formatted_filled_qty} @ {effective_entry_price}. Waiting for settlement...")
-
-            # CRITICAL: Wait for VALR to settle the coins into available balance
-            # Poll balance until coins appear or timeout (max 30 seconds)
-            base_currency = pair.replace("ZAR", "")
-            required_qty = filled_qty
-            max_wait = 30
-            start_wait = time.time()
-            settlement_ok = False
-
-            while (time.time() - start_wait) < max_wait:
-                # Check for shutdown signal
-                if self.bot and hasattr(self.bot, 'running') and not self.bot.running:
-                    self.logger.info(f"Shutdown detected during settlement wait")
-                    return None
-
-                try:
-                    balance = self.get_available_balance(base_currency)
-                    if balance >= required_qty:
-                        self.logger.info(f"Settlement complete: {base_currency} balance={balance}, required={required_qty}")
-                        settlement_ok = True
-                        break
-                    time.sleep(2.0)
-                except Exception as e:
-                    time.sleep(2.0)
-
-            if not settlement_ok:
-                self.logger.error(f"Settlement timeout after {max_wait}s. {base_currency} balance insufficient. Cancelling position.")
-                # Close position immediately - coins didn't arrive
-                self._close_position_at_market(
-                    {"id": f"temp_{pair}", "pair": pair, "quantity": filled_qty},
-                    reason="settlement_timeout"
-                )
-                return None
 
             # CRITICAL: Place TP/SL orders with validation - if either fails, close position immediately
             tp_order = None
