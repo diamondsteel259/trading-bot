@@ -753,6 +753,47 @@ class VALRTradingEngine:
         tp_id = position.get("take_profit_order_id")
         sl_id = position.get("stop_loss_order_id")
 
+        # CRITICAL: Check if TP/SL orders still exist on exchange
+        # If orders are missing from VALR (filled or cancelled), close the position
+        if tp_id or sl_id:
+            # Get all open orders from VALR to verify TP/SL still exist
+            try:
+                open_orders = self.api.get_open_orders(pair=pair)
+                open_order_ids = {str(order.get("orderId") or order.get("id") or "") for order in open_orders}
+
+                tp_exists = tp_id in open_order_ids if tp_id else False
+                sl_exists = sl_id in open_order_ids if sl_id else False
+
+                # If NEITHER TP nor SL exist on exchange, position was exited
+                if not tp_exists and not sl_exists:
+                    self.logger.warning(
+                        f"Position {pair} has no TP/SL orders on VALR. Orders were filled or cancelled. "
+                        f"Closing position (TP={tp_id}, SL={sl_id})"
+                    )
+                    self.position_manager.close_position(position_id, "orders_not_found_on_exchange")
+                    return
+
+                # If only ONE order is missing, the position was likely exited
+                if not tp_exists and sl_exists:
+                    self.logger.info(f"TP order {tp_id} not found on VALR for {pair}. Likely filled. Cancelling SL...")
+                    self._cancel_if_open(sl_id, pair=pair)
+                    if sl_id:
+                        self.order_persistence.update_order_status(sl_id, "cancelled")
+                    self.position_manager.close_position(position_id, "take_profit")
+                    return
+
+                if not sl_exists and tp_exists:
+                    self.logger.info(f"SL order {sl_id} not found on VALR for {pair}. Likely filled. Cancelling TP...")
+                    self._cancel_if_open(tp_id, pair=pair)
+                    if tp_id:
+                        self.order_persistence.update_order_status(tp_id, "cancelled")
+                    self.position_manager.close_position(position_id, "stop_loss")
+                    return
+
+            except Exception as e:
+                self.logger.error(f"Failed to check if TP/SL orders exist for {pair}: {e}")
+                # Continue with normal flow if check fails
+
         # CRITICAL: Fetch BOTH order statuses before taking any action (prevents race condition)
         tp_status = None
         sl_status = None
