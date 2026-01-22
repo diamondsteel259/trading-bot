@@ -194,7 +194,7 @@ The bot logs various events with structured data:
 
 ```
 2024-01-15 14:30:15 | INFO     | valr_bot | Starting VALR Trading Bot initialization...
-2024-01-15 14:30:15 | INFO     | valr_api | API_SUCCESS: {'endpoint': '/v1/time', 'method': 'GET', 'status_code': 200}
+2024-01-15 14:30:15 | INFO     | valr_api | API_SUCCESS: {'endpoint': '/v1/account/balances', 'method': 'GET', 'status_code': 200}
 2024-01-15 14:30:16 | INFO     | rsi_scanner | RSI_SCAN: {'pair': 'BTCZAR', 'rsi_value': 38.5, 'threshold': 45.0, 'action': 'BUY_SIGNAL'}
 2024-01-15 14:30:16 | INFO     | trading_engine | ORDER_EVENT: {'event_type': 'ENTRY_PLACED', 'order_id': '12345', 'pair': 'BTCZAR', 'side': 'buy', 'quantity': 0.001, 'price': 950000}
 ```
