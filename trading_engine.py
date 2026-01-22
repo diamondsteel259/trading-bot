@@ -764,21 +764,24 @@ class VALRTradingEngine:
                 tp_exists = tp_id in open_order_ids if tp_id else False
                 sl_exists = sl_id in open_order_ids if sl_id else False
 
-                # If NEITHER TP nor SL exist on exchange, position was exited
+                # If NEITHER TP nor SL exist on exchange, position was exited but coins may still be in wallet
+                # We need to close position at market to sell the coins
                 if not tp_exists and not sl_exists:
                     self.logger.warning(
                         f"Position {pair} has no TP/SL orders on VALR. Orders were filled or cancelled. "
-                        f"Closing position (TP={tp_id}, SL={sl_id})"
+                        f"Selling coins at market price (TP={tp_id}, SL={sl_id})"
                     )
-                    self.position_manager.close_position(position_id, "orders_not_found_on_exchange")
+                    self._close_position_at_market(position, reason="orders_not_found_on_exchange")
                     return
 
-                # If only ONE order is missing, the position was likely exited
+                # If only ONE order is missing, one exit order was filled - position was sold
+                # Cancel the remaining order and close position tracking (coins already sold)
                 if not tp_exists and sl_exists:
                     self.logger.info(f"TP order {tp_id} not found on VALR for {pair}. Likely filled. Cancelling SL...")
                     self._cancel_if_open(sl_id, pair=pair)
                     if sl_id:
                         self.order_persistence.update_order_status(sl_id, "cancelled")
+                    # Position already sold via TP, just close tracking
                     self.position_manager.close_position(position_id, "take_profit")
                     return
 
@@ -787,6 +790,7 @@ class VALRTradingEngine:
                     self._cancel_if_open(tp_id, pair=pair)
                     if tp_id:
                         self.order_persistence.update_order_status(tp_id, "cancelled")
+                    # Position already sold via SL, just close tracking
                     self.position_manager.close_position(position_id, "stop_loss")
                     return
 
