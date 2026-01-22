@@ -67,20 +67,25 @@ class Config:
     ORDERS_FILE_PATH: str
     ENABLE_ORDER_PERSISTENCE: bool = True
 
-    # Pair-specific precision
+    # Pair-specific precision (matches VALR tick sizes for order placement)
     PAIR_PRICE_DECIMALS: Dict[str, int] = {
-        "BTCZAR": 2,
-        "ETHZAR": 2,
-        "XRPZAR": 4,
-        "ADAZAR": 4,
-        "SOLZAR": 2,
-        "DOTZAR": 2,
-        "LINKZAR": 2,
-        "LTCZAR": 2,
-        "BCHZAR": 2,
-        "AVAXZAR": 2,
-        "DOGEZAR": 6,
-        "SHIBZAR": 10,
+        "BTCZAR": 0,     # Tick size: 1 (whole numbers)
+        "ETHZAR": 0,     # Tick size: 1 (whole numbers)
+        "XRPZAR": 2,     # Tick size: 0.01
+        "ADAZAR": 4,     # Tick size: 0.0001
+        "SOLZAR": 0,     # Tick size: 1 (whole numbers)
+        "DOTZAR": 2,     # Tick size: 0.01
+        "LINKZAR": 2,    # Tick size: 0.01
+        "LTCZAR": 2,     # Tick size: 0.01
+        "BCHZAR": 0,     # Tick size: 1 (whole numbers)
+        "AVAXZAR": 2,    # Tick size: 0.01
+        "DOGEZAR": 4,    # Tick size: 0.0001
+        "SHIBZAR": 8,    # Tick size: 0.00000001
+        "BNBZAR": 0,     # Tick size: 1 (whole numbers)
+        "TRXZAR": 4,     # Tick size: 0.0001
+        "USDTZAR": 2,    # Tick size: 0.01
+        "XLMZAR": 4,     # Tick size: 0.0001
+        "XAUTZAR": 0,    # Tick size: 1 (whole numbers)
         "BTCUSDT": 2,
         "ETHUSDT": 2,
     }
