@@ -19,9 +19,10 @@ class DecimalUtils:
     
     @staticmethod
     def format_price(price: Union[str, float, int, Decimal], decimals: int = 6) -> str:
-        """Format price with specified decimal places."""
+        """Format price with specified decimal places, using proper rounding for tick sizes."""
         decimal_price = DecimalUtils.to_decimal(price)
-        return str(decimal_price.quantize(Decimal('1.' + '0' * decimals), rounding=ROUND_DOWN))
+        # Use ROUND_HALF_UP for prices to match exchange tick size requirements
+        return str(decimal_price.quantize(Decimal('1.' + '0' * decimals), rounding=ROUND_HALF_UP))
     
     @staticmethod
     def format_quantity(quantity: Union[str, float, int, Decimal], decimals: int = 8) -> str:
