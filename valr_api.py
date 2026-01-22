@@ -117,7 +117,14 @@ class VALRAPI:
         url = f"{self.base_url}{endpoint}"
         path = f"/{self.config.VALR_API_VERSION}{endpoint}"
 
-        body = json.dumps(data) if data else ""
+        # For VALR API, DELETE requests send body as JSON, not as query params
+        # For GET requests, use params; for POST/PUT/DELETE, use data
+        if method.upper() == "GET":
+            body = ""
+        else:
+            # For POST, PUT, DELETE: send data as JSON body
+            body = json.dumps(data) if data else ""
+            params = None  # VALR API doesn't use params for non-GET requests
 
         timestamp = str(int(time.time() * 1000))
         signature = self._generate_signature(timestamp, method, path, body)
@@ -156,10 +163,18 @@ class VALRAPI:
                 )
 
                 try:
-                    response_data: Any = response.json() if response.content else {}
+                    # Handle DELETE requests that may return 204 No Content or 202 Accepted
+                    if response.status_code in (204, 202) and not response.content:
+                        response_data = {"success": True}
+                    else:
+                        response_data: Any = response.json() if response.content else {}
                 except json.JSONDecodeError as e:
-                    self.logger.error(f"Failed to parse JSON response: {e}")
-                    response_data = {"error": "Invalid JSON response"}
+                    # DELETE requests may return 204/202 without body, which is fine
+                    if response.status_code in (204, 202):
+                        response_data = {"success": True}
+                    else:
+                        self.logger.error(f"Failed to parse JSON response: {e}")
+                        response_data = {"error": "Invalid JSON response"}
 
                 api_response = VALRAPIResponse(
                     data=response_data,
@@ -321,35 +336,28 @@ class VALRAPI:
 
     def place_limit_order(self, pair: str, side: str, quantity: str, price: str, post_only: bool = True) -> Dict[str, Any]:
         """Place limit order optimized for scalp trading.
-        
+
         For scalp trading with R30 trades:
         - Entry orders use postOnly=True for maker fees (0.18%)
         - Exit orders (TP/SL) use postOnly=False for immediate execution
         - All orders are LIMIT type for price control
+
+        Endpoint: /v1/orders/limit (verified from official VALR documentation)
         """
         side_normalized = side.upper()
 
-        # Use the main orders endpoint with proper v1 path handling
-        endpoint = "/orders"
+        # Use the correct endpoint for limit orders per VALR API docs
+        endpoint = "/orders/limit"
 
-        # For scalp trading, ensure we use the correct order type
-        if post_only:
-            payload = {
-                "pair": pair, 
-                "side": side_normalized, 
-                "quantity": quantity, 
-                "price": price, 
-                "postOnly": True,
-                "type": "LIMIT"
-            }
-        else:
-            payload = {
-                "pair": pair, 
-                "side": side_normalized, 
-                "quantity": quantity, 
-                "price": price, 
-                "type": "LIMIT"
-            }
+        # Build payload according to VALR API specification
+        payload = {
+            "pair": pair,
+            "side": side_normalized,
+            "quantity": quantity,
+            "price": price,
+            "postOnly": post_only,
+            "timeInForce": "GTC"  # Good Till Cancel
+        }
 
         try:
             self.logger.info(f"Placing {side_normalized} order: {quantity} {pair} @ {price} (postOnly={post_only})")
@@ -372,19 +380,20 @@ class VALRAPI:
 
     def place_market_order(self, pair: str, side: str, quantity: str) -> Dict[str, Any]:
         """Place market order for scalp trading emergency exits.
-        
+
         Market orders are used only for emergency position closing when
         stop loss or take profit orders fail to execute within timeouts.
         Note: Market orders have higher fees (0.35% vs 0.18% maker).
+
+        Endpoint: /v1/orders/market (verified from official VALR documentation)
         """
         side_normalized = side.upper()
-        endpoint = "/orders"
+        endpoint = "/orders/market"
 
         payload = {
-            "pair": pair, 
-            "side": side_normalized, 
-            "quantity": quantity, 
-            "type": "MARKET"
+            "pair": pair,
+            "side": side_normalized,
+            "quoteAmount": quantity
         }
 
         try:
@@ -395,14 +404,55 @@ class VALRAPI:
             self.logger.error(f"Failed to place {side_normalized} market order: {e}")
             raise
 
-    def cancel_order(self, order_id: str) -> bool:
-        response = self._make_request_with_fallback("DELETE", [f"/orders/{order_id}"])
+    def cancel_order(self, order_id: str, pair: Optional[str] = None) -> bool:
+        """Cancel an order.
 
-        self.valr_logger.log_order_event(event_type="CANCELLED", order_id=order_id, pair="unknown", side="unknown")
-        return response.is_success()
+        Endpoint: /v1/orders/order (DELETE)
+        Body: {"pair": "BTCZAR", "orderId": "xxx"}
 
-    def get_order_status(self, order_id: str) -> Dict[str, Any]:
-        response = self._make_request_with_fallback("GET", [f"/orders/{order_id}"])
+        Args:
+            order_id: The order ID to cancel
+            pair: Trading pair (optional but recommended)
+
+        Returns:
+            True if cancellation succeeded
+        """
+        if pair is None:
+            # Try to find the pair from order history if not provided
+            self.logger.warning(f"cancel_order called without pair for order {order_id}")
+            pair = "BTCZAR"  # Default fallback, but caller should provide this
+
+        endpoint = "/orders/order"
+        params = {
+            "pair": pair,
+            "orderId": order_id
+        }
+
+        try:
+            response = self._make_request("DELETE", endpoint, data=params)
+            self.valr_logger.log_order_event(event_type="CANCELLED", order_id=order_id, pair=pair, side="unknown")
+            return response.is_success()
+        except VALRAPIErrorCode as e:
+            self.logger.error(f"Failed to cancel order {order_id}: {e}")
+            return False
+
+    def get_order_status(self, order_id: str, pair: Optional[str] = None) -> Dict[str, Any]:
+        """Get order status.
+
+        Endpoint: /v1/orders/{symbol}/orderid/{order_id} (GET)
+
+        Args:
+            order_id: The order ID to check
+            pair: Trading pair (required for the endpoint)
+
+        Returns:
+            Order status information
+        """
+        if pair is None:
+            raise ValueError("pair is required for get_order_status endpoint")
+
+        endpoint = f"/orders/{pair}/orderid/{order_id}"
+        response = self._make_request("GET", endpoint)
         return response.data if isinstance(response.data, dict) else {"data": response.data}
 
     def get_order_history(self, pair: Optional[str] = None, limit: int = 100) -> List[Dict]:
