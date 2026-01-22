@@ -67,14 +67,28 @@ class RSIScanner:
         return rsi
 
     def get_rsi(self, pair: str, period: int = 14) -> Optional[float]:
+        """Get RSI for scalp trading signals.
+        
+        Uses VALR's market summary endpoint to get current prices
+        and calculates RSI locally for oversold detection.
+        """
         try:
+            # Get current price for scalp trading entry calculation
             last_price = float(self.api.get_last_traded_price(pair))
             if last_price <= 0:
                 return None
 
             self._add_price_point(pair, last_price)
             history = self._price_history.get(pair, [])
-            return self._calculate_rsi(history, period=period)
+            
+            if len(history) < period + 1:
+                return None
+                
+            rsi_value = self._calculate_rsi(history, period=period)
+            
+            # Log for scalp trading analysis
+            self.logger.debug(f"RSI for {pair}: {rsi_value:.2f} (price: {last_price:.4f})")
+            return rsi_value
         except Exception as e:
             self.logger.error(f"Failed to get RSI for {pair}: {e}")
             return None

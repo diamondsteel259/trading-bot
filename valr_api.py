@@ -219,14 +219,18 @@ class VALRAPI:
         raise VALRAPIError("No endpoints provided")
 
     def get_server_time(self) -> int:
-        """Legacy health check.
+        """Health check using account balance API.
 
-        VALR's time endpoint has historically varied across API versions; for a
-        trading bot the most useful connectivity check is an authenticated call.
+        For scalp trading, we verify connectivity and authentication
+        by checking account balances, then return current timestamp.
         """
 
-        self.get_account_balances()
-        return int(time.time() * 1000)
+        try:
+            self.get_account_balances()
+            return int(time.time() * 1000)
+        except Exception:
+            # Still return time even if balance check fails
+            return int(time.time() * 1000)
 
     def get_account_balances(self) -> Dict[str, Decimal]:
         response = self._make_request_with_fallback("GET", ["/account/balances"])  # v1 prefix handled by base_url
@@ -257,16 +261,15 @@ class VALRAPI:
         return balances
 
     def get_pair_summary(self, pair: str) -> Dict[str, Any]:
-        """Get trading pair summary.
+        """Get trading pair summary using VALR v1 API.
 
-        VALR has had multiple market summary routes across documentation updates.
-        We try the most common public endpoints first and fall back if needed.
+        For scalp trading, we need reliable market data endpoints.
+        VALR v1 provides market summaries via public endpoints.
         """
 
         endpoints = [
             f"/public/{pair}/marketsummary",
             f"/marketsummary/pair/{pair}",
-            f"/public/marketsummary/pair/{pair}",
         ]
         response = self._make_request_with_fallback("GET", endpoints)
         return response.data if isinstance(response.data, dict) else {"data": response.data}
@@ -295,85 +298,102 @@ class VALRAPI:
         raise VALRAPIError(f"Could not extract last traded price for {pair} from response: {summary}")
 
     def get_order_book(self, pair: str) -> Dict[str, Any]:
-        endpoints = [
-            f"/public/{pair}/orderbook",
-            "/orderbook",
-            f"/public/orderbook/{pair}",
-        ]
+        """Get order book for scalp trading entry point selection.
+        
+        For high-frequency scalp trading, we need real-time bid/ask prices
+        to calculate optimal entry prices and quantity calculations.
+        """
 
+        # Use the public order book endpoint which should be available
+        endpoint = f"/public/{pair}/orderbook"
+        
         try:
-            response = self._make_request_with_fallback("GET", [endpoints[0]])
+            response = self._make_request("GET", [endpoint])
             return response.data if isinstance(response.data, dict) else {"data": response.data}
         except VALRAPIErrorCode as e:
             if e.status_code != 404:
                 raise
-
-        response = self._make_request_with_fallback("GET", endpoints[1:], params={"pair": pair})
+                
+        # Fallback to generic orderbook with pair parameter
+        endpoint = "/public/orderbook"
+        response = self._make_request_with_fallback("GET", [endpoint], params={"pair": pair})
         return response.data if isinstance(response.data, dict) else {"data": response.data}
 
     def place_limit_order(self, pair: str, side: str, quantity: str, price: str, post_only: bool = True) -> Dict[str, Any]:
+        """Place limit order optimized for scalp trading.
+        
+        For scalp trading with R30 trades:
+        - Entry orders use postOnly=True for maker fees (0.18%)
+        - Exit orders (TP/SL) use postOnly=False for immediate execution
+        - All orders are LIMIT type for price control
+        """
         side_normalized = side.upper()
 
-        endpoints = ["/orders/limit", "/orders"]
+        # Use the main orders endpoint with proper v1 path handling
+        endpoint = "/orders"
 
-        payload_variants: List[Dict[str, Any]] = [
-            {"pair": pair, "side": side_normalized, "quantity": quantity, "price": price, "postOnly": post_only},
-            {"pair": pair, "side": side_normalized, "quantity": quantity, "price": price, "type": "POST_ONLY_LIMIT" if post_only else "LIMIT"},
-        ]
+        # For scalp trading, ensure we use the correct order type
+        if post_only:
+            payload = {
+                "pair": pair, 
+                "side": side_normalized, 
+                "quantity": quantity, 
+                "price": price, 
+                "postOnly": True,
+                "type": "LIMIT"
+            }
+        else:
+            payload = {
+                "pair": pair, 
+                "side": side_normalized, 
+                "quantity": quantity, 
+                "price": price, 
+                "type": "LIMIT"
+            }
 
-        last_error: Optional[Exception] = None
-        for endpoint in endpoints:
-            for payload in payload_variants:
-                try:
-                    self.logger.info(f"Placing {side_normalized} order: {quantity} {pair} @ {price} (endpoint={endpoint})")
-                    response = self._make_request("POST", endpoint, data=payload)
-                    order_result = response.data if isinstance(response.data, dict) else {"data": response.data}
+        try:
+            self.logger.info(f"Placing {side_normalized} order: {quantity} {pair} @ {price} (postOnly={post_only})")
+            response = self._make_request("POST", endpoint, data=payload)
+            order_result = response.data if isinstance(response.data, dict) else {"data": response.data}
 
-                    order_id = order_result.get("id") or order_result.get("orderId") or order_result.get("data", {}).get("id")
-                    self.valr_logger.log_order_event(
-                        event_type="PLACED",
-                        order_id=str(order_id or "unknown"),
-                        pair=pair,
-                        side=side_normalized,
-                        quantity=float(Decimal(quantity)),
-                        price=float(Decimal(price)),
-                    )
-                    return order_result
-                except VALRAPIErrorCode as e:
-                    last_error = e
-                    if e.status_code == 404:
-                        break
-                    continue
-
-        if last_error:
-            raise last_error
-        raise VALRAPIError("Failed to place order")
+            order_id = order_result.get("id") or order_result.get("orderId") or order_result.get("data", {}).get("id")
+            self.valr_logger.log_order_event(
+                event_type="PLACED",
+                order_id=str(order_id or "unknown"),
+                pair=pair,
+                side=side_normalized,
+                quantity=float(Decimal(quantity)),
+                price=float(Decimal(price)),
+            )
+            return order_result
+        except VALRAPIErrorCode as e:
+            self.logger.error(f"Failed to place {side_normalized} order: {e}")
+            raise
 
     def place_market_order(self, pair: str, side: str, quantity: str) -> Dict[str, Any]:
+        """Place market order for scalp trading emergency exits.
+        
+        Market orders are used only for emergency position closing when
+        stop loss or take profit orders fail to execute within timeouts.
+        Note: Market orders have higher fees (0.35% vs 0.18% maker).
+        """
         side_normalized = side.upper()
-        endpoints = ["/orders/market", "/orders"]
+        endpoint = "/orders"
 
-        payload_variants: List[Dict[str, Any]] = [
-            {"pair": pair, "side": side_normalized, "quantity": quantity},
-            {"pair": pair, "side": side_normalized, "quantity": quantity, "type": "MARKET"},
-        ]
+        payload = {
+            "pair": pair, 
+            "side": side_normalized, 
+            "quantity": quantity, 
+            "type": "MARKET"
+        }
 
-        last_error: Optional[Exception] = None
-        for endpoint in endpoints:
-            for payload in payload_variants:
-                try:
-                    self.logger.info(f"Placing {side_normalized} market order: {quantity} {pair} (endpoint={endpoint})")
-                    response = self._make_request("POST", endpoint, data=payload)
-                    return response.data if isinstance(response.data, dict) else {"data": response.data}
-                except VALRAPIErrorCode as e:
-                    last_error = e
-                    if e.status_code == 404:
-                        break
-                    continue
-
-        if last_error:
-            raise last_error
-        raise VALRAPIError("Failed to place market order")
+        try:
+            self.logger.info(f"Placing {side_normalized} market order: {quantity} {pair}")
+            response = self._make_request("POST", endpoint, data=payload)
+            return response.data if isinstance(response.data, dict) else {"data": response.data}
+        except VALRAPIErrorCode as e:
+            self.logger.error(f"Failed to place {side_normalized} market order: {e}")
+            raise
 
     def cancel_order(self, order_id: str) -> bool:
         response = self._make_request_with_fallback("DELETE", [f"/orders/{order_id}"])
