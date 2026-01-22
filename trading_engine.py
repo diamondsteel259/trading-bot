@@ -517,7 +517,7 @@ class VALRTradingEngine:
             entry_order_result = self.api.place_market_order(
                 pair=pair,
                 side="BUY",
-                base_amount=str(trade_amount_quote),  # R30 in quote currency
+                quantity=str(trade_amount_quote),  # R100 in quote currency (ZAR)
             )
 
             # CRITICAL: Wait 1 second after order placement to avoid 404 errors when checking status
