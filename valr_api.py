@@ -15,7 +15,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from config import Config
-from logging_setup import get_logger
+from logging_setup import get_logger, get_valr_logger
 from decimal_utils import DecimalUtils
 
 
@@ -102,6 +102,7 @@ class VALRAPI:
         """Initialize VALR API client."""
         self.config = config
         self.logger = get_logger("valr_api")
+        self.valr_logger = get_valr_logger()
         
         # Setup session with connection pooling and retry strategy
         self.session = requests.Session()
@@ -179,7 +180,7 @@ class VALRAPI:
                 response_time = time.time() - start_time
                 
                 # Log API call
-                self.logger.log_api_call(
+                self.valr_logger.log_api_call(
                     endpoint=endpoint,
                     method=method,
                     status_code=response.status_code,
@@ -290,7 +291,7 @@ class VALRAPI:
         response = self._make_request("POST", "/orders", data=order_data)
         
         order_result = response.data
-        self.logger.log_order_event(
+        self.valr_logger.log_order_event(
             event_type="PLACED",
             order_id=order_result.get('id', 'unknown'),
             pair=pair,
@@ -305,7 +306,7 @@ class VALRAPI:
         """Cancel an order."""
         response = self._make_request("DELETE", f"/orders/{order_id}")
         
-        self.logger.log_order_event(
+        self.valr_logger.log_order_event(
             event_type="CANCELLED",
             order_id=order_id,
             pair="unknown",

@@ -10,7 +10,7 @@ import time
 
 from valr_api import VALRAPI, VALRAPIError
 from config import Config
-from logging_setup import get_logger
+from logging_setup import get_logger, get_valr_logger
 from decimal_utils import DecimalUtils
 from order_persistence import get_order_persistence
 
@@ -33,6 +33,7 @@ class PositionManager:
         self.api = api
         self.config = config
         self.logger = get_logger("position_manager")
+        self.valr_logger = get_valr_logger()
         self.active_positions: Dict[str, Dict] = {}
     
     def create_position(self, pair: str, quantity: Decimal, entry_price: Decimal,
@@ -68,7 +69,7 @@ class PositionManager:
         
         self.active_positions[position_id] = position
         
-        self.logger.log_position_update(
+        self.valr_logger.log_position_update(
             pair=pair,
             position_type="created",
             quantity=float(quantity),
@@ -94,7 +95,7 @@ class PositionManager:
             position["status"] = "filled"
             self.logger.info(f"Position {position_id} fully filled")
         
-        self.logger.log_position_update(
+        self.valr_logger.log_position_update(
             pair=position["pair"],
             position_type="filled",
             quantity=float(position["total_filled"]),
@@ -112,7 +113,7 @@ class PositionManager:
         position["closed_at"] = datetime.now()
         position["close_reason"] = reason
         
-        self.logger.log_position_update(
+        self.valr_logger.log_position_update(
             pair=position["pair"],
             position_type="closed",
             quantity=float(position["total_filled"]),
@@ -140,6 +141,7 @@ class VALRTradingEngine:
         self.api = api
         self.config = config
         self.logger = get_logger("trading_engine")
+        self.valr_logger = get_valr_logger()
         self.position_manager = PositionManager(api, config)
         self.order_persistence = get_order_persistence()
         
@@ -258,7 +260,7 @@ class VALRTradingEngine:
                     entry_price=Decimal(entry_price)
                 )
                 
-                self.logger.log_order_event(
+                self.valr_logger.log_order_event(
                     event_type="ENTRY_PLACED",
                     order_id=order_id,
                     pair=pair,
@@ -304,7 +306,7 @@ class VALRTradingEngine:
             
             tp_order_id = order_result.get('id')
             
-            self.logger.log_order_event(
+            self.valr_logger.log_order_event(
                 event_type="TAKE_PROFIT_PLACED",
                 order_id=tp_order_id or "unknown",
                 pair=pair,
@@ -346,7 +348,7 @@ class VALRTradingEngine:
             
             sl_order_id = order_result.get('id')
             
-            self.logger.log_order_event(
+            self.valr_logger.log_order_event(
                 event_type="STOP_LOSS_PLACED",
                 order_id=sl_order_id or "unknown",
                 pair=pair,
