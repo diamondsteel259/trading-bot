@@ -343,11 +343,11 @@ class RSIScanner:
             trade_amount_quote = self.config.BASE_TRADE_AMOUNT
             quantity = trade_amount_quote / DecimalUtils.to_decimal(recommended_entry)
 
-            price_decimals = self.config.get_pair_price_decimals(pair)
+            tick_size = self.config.get_pair_tick_size(pair)
             qty_decimals = self.config.get_pair_quantity_decimals(pair)
 
             formatted_quantity = DecimalUtils.format_quantity(quantity, qty_decimals)
-            formatted_price = DecimalUtils.format_price(recommended_entry, price_decimals)
+            formatted_price = DecimalUtils.format_price(recommended_entry, tick_size)
 
             return {
                 "pair": pair,

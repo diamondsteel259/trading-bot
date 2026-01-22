@@ -18,11 +18,30 @@ class DecimalUtils:
         return Decimal(str(value))
     
     @staticmethod
-    def format_price(price: Union[str, float, int, Decimal], decimals: int = 6) -> str:
-        """Format price with specified decimal places, using proper rounding for tick sizes."""
-        decimal_price = DecimalUtils.to_decimal(price)
-        # Use ROUND_HALF_UP for prices to match exchange tick size requirements
-        return str(decimal_price.quantize(Decimal('1.' + '0' * decimals), rounding=ROUND_HALF_UP))
+    def format_price(price: Union[str, float, int, Decimal], tick_size: Union[str, Decimal] = "0.01") -> str:
+        """
+        Format price to nearest valid tick size.
+
+        Args:
+            price: The price to format
+            tick_size: Minimum price increment (e.g., "0.1", "1", "0.00001")
+
+        Returns:
+            Price string rounded DOWN to nearest tick (e.g., 200.59 with tick 0.1 → "200.5")
+        """
+        try:
+            decimal_price = DecimalUtils.to_decimal(price)
+            tick = DecimalUtils.to_decimal(tick_size)
+
+            # Snap to grid: divide by tick, round down, multiply back
+            rounded_price = (decimal_price / tick).quantize(Decimal("1"), rounding=ROUND_DOWN) * tick
+
+            # Format without scientific notation
+            return f"{rounded_price:f}".rstrip('0').rstrip('.') if '.' in f"{rounded_price:f}" else f"{rounded_price:f}"
+        except Exception:
+            # Fallback to 2 decimals if tick_size fails
+            decimal_price = DecimalUtils.to_decimal(price)
+            return str(decimal_price.quantize(Decimal('0.01'), rounding=ROUND_DOWN))
     
     @staticmethod
     def format_quantity(quantity: Union[str, float, int, Decimal], decimals: int = 8) -> str:
@@ -147,9 +166,9 @@ def to_decimal(value: Union[str, float, int, Decimal]) -> Decimal:
     return DecimalUtils.to_decimal(value)
 
 
-def format_price(price: Union[str, float, int, Decimal], decimals: int = 6) -> str:
-    """Format price with specified decimal places."""
-    return DecimalUtils.format_price(price, decimals)
+def format_price(price: Union[str, float, int, Decimal], tick_size: Union[str, Decimal] = "0.01") -> str:
+    """Format price to nearest valid tick size."""
+    return DecimalUtils.format_price(price, tick_size)
 
 
 def format_quantity(quantity: Union[str, float, int, Decimal], decimals: int = 8) -> str:

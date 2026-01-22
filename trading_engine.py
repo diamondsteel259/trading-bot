@@ -387,10 +387,10 @@ class VALRTradingEngine:
             trade_amount_quote = self.config.BASE_TRADE_AMOUNT
             qty = trade_amount_quote / entry_price
 
-            price_decimals = self.config.get_pair_price_decimals(pair)
+            tick_size = self.config.get_pair_tick_size(pair)
             qty_decimals = self.config.get_pair_quantity_decimals(pair)
 
-            formatted_price = DecimalUtils.format_price(entry_price, price_decimals)
+            formatted_price = DecimalUtils.format_price(entry_price, tick_size)
             formatted_qty = DecimalUtils.format_quantity(qty, qty_decimals)
 
             # Check balance: R30 + 0.5% taker fee + safety buffer = R30.15 + 0.05
@@ -422,6 +422,10 @@ class VALRTradingEngine:
                 price=formatted_price,
                 post_only=False,  # Allow immediate fill for scalping
             )
+
+            # CRITICAL: Wait 1 second after order placement to avoid 404 errors when checking status
+            time.sleep(1.0)
+
             entry_order_id = str(entry_order_result.get("id") or entry_order_result.get("orderId") or "")
             if not entry_order_id:
                 self.logger.error(f"Entry order placement succeeded but no order id returned: {entry_order_result}")
@@ -501,8 +505,9 @@ class VALRTradingEngine:
                 effective_entry_price, self.config.STOP_LOSS_PERCENTAGE
             )
 
-            formatted_tp = DecimalUtils.format_price(tp_price, price_decimals)
-            formatted_sl = DecimalUtils.format_price(sl_price, price_decimals)
+            tick_size = self.config.get_pair_tick_size(pair)
+            formatted_tp = DecimalUtils.format_price(tp_price, tick_size)
+            formatted_sl = DecimalUtils.format_price(sl_price, tick_size)
             formatted_filled_qty = DecimalUtils.format_quantity(filled_qty, qty_decimals)
 
             self.logger.info(f"Entry filled: qty={formatted_filled_qty} @ {effective_entry_price}. Placing TP/SL...")
@@ -522,6 +527,10 @@ class VALRTradingEngine:
                     price=formatted_tp,
                     post_only=False,  # Need immediate execution
                 )
+
+                # CRITICAL: Wait 1 second after order placement to avoid 404 errors
+                time.sleep(1.0)
+
                 tp_order_id = str(tp_order.get("id") or tp_order.get("orderId") or "")
 
                 if not tp_order_id:
@@ -546,6 +555,10 @@ class VALRTradingEngine:
                     price=formatted_sl,
                     post_only=False,  # Need immediate execution
                 )
+
+                # CRITICAL: Wait 1 second after order placement to avoid 404 errors
+                time.sleep(1.0)
+
                 sl_order_id = str(sl_order.get("id") or sl_order.get("orderId") or "")
 
                 if not sl_order_id:
@@ -697,8 +710,8 @@ class VALRTradingEngine:
                 self.position_manager.close_position(position_id, reason)
                 return
 
-            price_decimals = self.config.get_pair_price_decimals(pair)
-            aggressive_price = DecimalUtils.format_price(best_bid, price_decimals)
+            tick_size = self.config.get_pair_tick_size(pair)
+            aggressive_price = DecimalUtils.format_price(best_bid, tick_size)
             try:
                 self.api.place_limit_order(
                     pair=pair,
