@@ -468,31 +468,23 @@ class VALRTradingEngine:
                     self.order_persistence.update_order_status(entry_order_id, "cancelled")
                 return None
 
-            # Critical: Cancel if not filled within 5 seconds (scalp trading with immediate fills)
-            if fill_state in ["TIMEOUT", "CANCELLED"]:
-                self.logger.warning(f"Entry order not filled ({fill_state}) - market may have moved. Cancelling {entry_order_id}...")
+            # Critical: Only proceed if order is actually FILLED
+            if fill_state != "FILLED":
+                self.logger.warning(f"Entry order not filled ({fill_state}). Cancelling {entry_order_id}...")
                 try:
                     self.api.cancel_order(entry_order_id, pair=pair)
                 finally:
                     self.order_persistence.update_order_status(entry_order_id, "cancelled")
                 return None
 
-            if fill_state == "PARTIALLY_FILLED":
-                self.logger.warning(f"Entry partially filled (qty={filled_qty}). Cancelling remainder...")
+            # Verify we actually got filled quantity - if not, order didn't really fill
+            if filled_qty <= 0:
+                self.logger.error(f"Order {entry_order_id} marked FILLED but qty=0. Cancelling...")
                 try:
                     self.api.cancel_order(entry_order_id, pair=pair)
                 finally:
-                    self.order_persistence.update_order_status(entry_order_id, "filled")
-
-            # If order filled but quantity extraction failed, use the original order quantity
-            # This happens when fills endpoint returns 404 immediately after fill
-            if filled_qty <= 0:
-                self.logger.warning(
-                    f"Entry order marked {fill_state} but couldn't extract filled qty. "
-                    f"Using original order quantity: {formatted_qty}"
-                )
-                filled_qty = Decimal(formatted_qty)
-                avg_fill_price = Decimal(formatted_price)
+                    self.order_persistence.update_order_status(entry_order_id, "cancelled")
+                return None
 
             self.order_persistence.update_order_status(entry_order_id, "filled")
             effective_entry_price = avg_fill_price or Decimal(formatted_price)
@@ -513,27 +505,37 @@ class VALRTradingEngine:
             self.logger.info(f"Entry filled: qty={formatted_filled_qty} @ {effective_entry_price}. Waiting for settlement...")
 
             # CRITICAL: Wait for VALR to settle the coins into available balance
-            # Poll balance with exponential backoff until coins appear or timeout (max 30 seconds)
+            # Poll balance until coins appear or timeout (max 30 seconds)
             base_currency = pair.replace("ZAR", "")
             required_qty = filled_qty
             max_wait = 30
             start_wait = time.time()
+            settlement_ok = False
 
             while (time.time() - start_wait) < max_wait:
+                # Check for shutdown signal
+                if self.bot and hasattr(self.bot, 'running') and not self.bot.running:
+                    self.logger.info(f"Shutdown detected during settlement wait")
+                    return None
+
                 try:
                     balance = self.get_available_balance(base_currency)
                     if balance >= required_qty:
                         self.logger.info(f"Settlement complete: {base_currency} balance={balance}, required={required_qty}")
+                        settlement_ok = True
                         break
-                    self.logger.debug(f"Waiting for settlement: {base_currency} balance={balance}, required={required_qty}")
                     time.sleep(2.0)
                 except Exception as e:
-                    self.logger.debug(f"Balance check failed during settlement wait: {e}")
                     time.sleep(2.0)
-            else:
-                self.logger.warning(f"Settlement timeout after {max_wait}s. {base_currency} balance may be insufficient for TP/SL orders")
 
-            self.logger.info(f"Placing TP/SL orders...")
+            if not settlement_ok:
+                self.logger.error(f"Settlement timeout after {max_wait}s. {base_currency} balance insufficient. Cancelling position.")
+                # Close position immediately - coins didn't arrive
+                self._close_position_at_market(
+                    {"id": f"temp_{pair}", "pair": pair, "quantity": filled_qty},
+                    reason="settlement_timeout"
+                )
+                return None
 
             # CRITICAL: Place TP/SL orders with validation - if either fails, close position immediately
             tp_order = None
@@ -550,7 +552,6 @@ class VALRTradingEngine:
                     price=formatted_tp,
                     post_only=False,  # Need immediate execution
                 )
-                self.logger.info(f"TP order response from VALR: {tp_order}")
 
                 # CRITICAL: Wait 1 second after order placement to avoid 404 errors
                 time.sleep(1.0)
@@ -560,12 +561,17 @@ class VALRTradingEngine:
                 if not tp_order_id:
                     raise TradingError("TP order placement returned no order ID")
 
-                # Immediately verify order exists on VALR
+                # Verify order was accepted
                 try:
                     tp_status_check = self.api.get_order_status(tp_order_id, pair=pair)
-                    self.logger.info(f"TP order status immediately after placement: {tp_status_check}")
+                    tp_status_type = tp_status_check.get("orderStatusType", "")
+                    if tp_status_type == "Failed":
+                        fail_reason = tp_status_check.get("failedReason", "Unknown")
+                        raise TradingError(f"TP order failed: {fail_reason}")
+                except TradingError:
+                    raise
                 except Exception as check_error:
-                    self.logger.error(f"TP order {tp_order_id} doesn't exist on VALR immediately after placement: {check_error}")
+                    self.logger.warning(f"Could not verify TP order status: {check_error}")
 
             except Exception as e:
                 self.logger.error(f"CRITICAL: Failed to place TP order for {pair}: {e}. Closing entry position immediately.")
@@ -586,7 +592,6 @@ class VALRTradingEngine:
                     price=formatted_sl,
                     post_only=False,  # Need immediate execution
                 )
-                self.logger.info(f"SL order response from VALR: {sl_order}")
 
                 # CRITICAL: Wait 1 second after order placement to avoid 404 errors
                 time.sleep(1.0)
@@ -596,12 +601,17 @@ class VALRTradingEngine:
                 if not sl_order_id:
                     raise TradingError("SL order placement returned no order ID")
 
-                # Immediately verify order exists on VALR
+                # Verify order was accepted
                 try:
                     sl_status_check = self.api.get_order_status(sl_order_id, pair=pair)
-                    self.logger.info(f"SL order status immediately after placement: {sl_status_check}")
+                    sl_status_type = sl_status_check.get("orderStatusType", "")
+                    if sl_status_type == "Failed":
+                        fail_reason = sl_status_check.get("failedReason", "Unknown")
+                        raise TradingError(f"SL order failed: {fail_reason}")
+                except TradingError:
+                    raise
                 except Exception as check_error:
-                    self.logger.error(f"SL order {sl_order_id} doesn't exist on VALR immediately after placement: {check_error}")
+                    self.logger.warning(f"Could not verify SL order status: {check_error}")
 
             except Exception as e:
                 self.logger.error(f"CRITICAL: Failed to place SL order for {pair}: {e}. Cancelling TP and closing position.")
