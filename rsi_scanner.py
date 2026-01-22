@@ -10,7 +10,7 @@ revisions; using market summary pricing is more reliable.
 from __future__ import annotations
 
 from typing import List, Dict, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 
 from valr_api import VALRAPI
@@ -44,6 +44,118 @@ class RSIScanner:
         if len(history) > self._max_history:
             self._price_history[pair] = history[-self._max_history :]
 
+    def _aggregate_trades_to_1m_candles(self, trades: List[Dict], min_candles: int = 15) -> List[float]:
+        """Aggregate recent trades into 1-minute candles and return close prices.
+        
+        For RSI calculation on 1-minute timeframe, we need at least 15 close prices.
+        This method groups trades by 1-minute intervals and extracts the close price
+        (last trade price) from each candle.
+        
+        Args:
+            trades: List of trade dictionaries from VALR API
+            min_candles: Minimum number of candles to generate
+            
+        Returns:
+            List of close prices for each 1-minute candle (oldest to newest)
+        """
+        if not trades:
+            return []
+        
+        # Group trades by minute
+        candles: Dict[str, List[Dict]] = {}
+        
+        for trade in trades:
+            try:
+                # Parse ISO timestamp to minute precision
+                traded_at = trade.get("tradedAt", "")
+                if not traded_at:
+                    continue
+                    
+                # Parse and truncate to minute
+                dt = datetime.fromisoformat(traded_at.replace("Z", "+00:00"))
+                minute_key = dt.strftime("%Y-%m-%d %H:%M")
+                
+                if minute_key not in candles:
+                    candles[minute_key] = []
+                    
+                candles[minute_key].append(trade)
+            except Exception as e:
+                self.logger.debug(f"Failed to parse trade timestamp: {e}")
+                continue
+        
+        # Sort by minute key and extract close prices
+        sorted_minutes = sorted(candles.keys())
+        close_prices = []
+        
+        for minute_key in sorted_minutes:
+            trades_in_minute = candles[minute_key]
+            if trades_in_minute:
+                # Close price is the last trade in the minute
+                # Trades are sorted newest first from API, so take first one
+                last_trade = trades_in_minute[0]
+                close_price = float(last_trade.get("price", 0))
+                if close_price > 0:
+                    close_prices.append(close_price)
+        
+        # Return at least min_candles, but prefer all available
+        if len(close_prices) >= min_candles:
+            return close_prices
+        
+        # If we don't have enough candles from aggregation, 
+        # fall back to using individual trade prices (tick-level)
+        if len(trades) >= min_candles:
+            self.logger.debug(f"Not enough 1m candles ({len(close_prices)}), using tick-level prices")
+            tick_prices = []
+            for trade in reversed(trades[-min_candles:]):  # Reverse to get oldest to newest
+                price = float(trade.get("price", 0))
+                if price > 0:
+                    tick_prices.append(price)
+            return tick_prices[-min_candles:] if len(tick_prices) >= min_candles else tick_prices
+        
+        return close_prices
+
+    def _initialize_price_history(self, pair: str, min_candles: int = 15) -> bool:
+        """Initialize price history for a pair if not enough data exists.
+        
+        Fetches recent trades and aggregates them into 1-minute candles
+        to build initial price history for RSI calculation.
+        
+        Args:
+            pair: Trading pair to initialize
+            min_candles: Minimum number of candles needed
+            
+        Returns:
+            True if successfully initialized with enough data, False otherwise
+        """
+        current_history = self._price_history.get(pair, [])
+        if len(current_history) >= min_candles:
+            return True  # Already have enough data
+        
+        try:
+            self.logger.info(f"Fetching historical trades for {pair} to initialize RSI calculation...")
+            trades = self.api.get_recent_trades(pair, limit=100)
+            
+            if not trades:
+                self.logger.warning(f"No trades available for {pair}")
+                return False
+            
+            close_prices = self._aggregate_trades_to_1m_candles(trades, min_candles)
+            
+            if len(close_prices) >= min_candles:
+                self._price_history[pair] = close_prices
+                self.logger.info(f"Initialized {pair} with {len(close_prices)} candles ✅")
+                return True
+            else:
+                self.logger.warning(f"Only got {len(close_prices)} candles for {pair}, need {min_candles}")
+                # Store what we have anyway
+                if close_prices:
+                    self._price_history[pair] = close_prices
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Failed to initialize price history for {pair}: {e}")
+            return False
+
     def _calculate_rsi(self, prices: List[float], period: int = 14) -> Optional[float]:
         if len(prices) < period + 1:
             return None
@@ -69,16 +181,23 @@ class RSIScanner:
     def get_rsi(self, pair: str, period: int = 14) -> Tuple[Optional[float], Optional[float], int, str]:
         """Get RSI data for scalp trading signals.
         
-        Uses VALR's market summary endpoint to get current prices
-        and calculates RSI locally for oversold detection.
+        Uses VALR's recent trades to build 1-minute candles for RSI calculation.
+        Initializes price history automatically if not enough data is available.
 
         Returns:
             Tuple of (rsi_value, last_price, history_len, error_msg)
         """
         last_price = None
         history_len = 0
+        min_candles = period + 1  # RSI needs period + 1 data points
+        
         try:
-            # Get current price for scalp trading entry calculation
+            # Initialize price history if needed (first scan or insufficient data)
+            current_history = self._price_history.get(pair, [])
+            if len(current_history) < min_candles:
+                self._initialize_price_history(pair, min_candles)
+            
+            # Get current price and add to history
             price_data = self.api.get_last_traded_price(pair)
             last_price = float(price_data)
             if last_price <= 0:
@@ -88,8 +207,8 @@ class RSIScanner:
             history = self._price_history.get(pair, [])
             history_len = len(history)
             
-            if history_len < period + 1:
-                return None, last_price, history_len, f"Not enough candles ({history_len}/{period + 1})"
+            if history_len < min_candles:
+                return None, last_price, history_len, f"Not enough candles ({history_len}/{min_candles})"
                 
             rsi_value = self._calculate_rsi(history, period=period)
             if rsi_value is None:
